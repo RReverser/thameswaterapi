@@ -19,12 +19,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Retrieve meter data from Thames Water"
     )
-    parser.add_argument(
-        "email", nargs="?", help="Thames Water account email"
-    )
-    parser.add_argument(
-        "password", nargs="?", help="Thames Water account password"
-    )
+    parser.add_argument("email", nargs="?", help="Thames Water account email")
+    parser.add_argument("password", nargs="?", help="Thames Water account password")
     parser.add_argument(
         "--tariff",
         action="store_true",
@@ -56,11 +52,15 @@ def main() -> None:
         tariff = get_tariff()
         print(f"Clean water:  £{tariff.clean_water_rate_per_m3}/m3")
         print(f"Wastewater:   £{tariff.wastewater_rate_per_m3}/m3")
-        print(f"Volumetric:   £{tariff.volumetric_rate_per_m3}/m3 "
-              f"(£{tariff.unit_rate_per_litre:.7f}/L)")
-        print(f"Fixed charge: £{tariff.water_fixed_per_year}/yr water + "
-              f"£{tariff.wastewater_fixed_per_year}/yr wastewater "
-              f"(£{tariff.standing_charge_per_day}/day)")
+        print(
+            f"Volumetric:   £{tariff.volumetric_rate_per_m3}/m3 "
+            f"(£{tariff.unit_rate_per_litre:.7f}/L)"
+        )
+        print(
+            f"Fixed charge: £{tariff.water_fixed_per_year}/yr water + "
+            f"£{tariff.wastewater_fixed_per_year}/yr wastewater "
+            f"(£{tariff.standing_charge_per_day}/day)"
+        )
         return
 
     if not args.email or not args.password:
@@ -89,16 +89,16 @@ def main() -> None:
     print()
 
     print("Daily readings (last 30 days):")
-    for m in lines_to_timeseries(meters_response.Lines):
-        print(f"  {m.start}  usage={m.usage}L  total={m.total}L")
+    for daily in lines_to_timeseries(meters_response.Lines):
+        print(f"  {daily.start}  usage={daily.usage}L  total={daily.total}L")
     print()
 
     end = datetime.datetime.now() - datetime.timedelta(days=1)
     start = end - datetime.timedelta(days=1)
     usage = tw.get_meter_usage(meter, start, end)
     print(f"Hourly readings ({start.date()}):")
-    for m in meter_usage_lines_to_timeseries(start, usage.Lines):
-        print(f"  {m.hour_start}  usage={m.usage}L  total={m.total}L")
+    for hourly in meter_usage_lines_to_timeseries(start, usage.Lines):
+        print(f"  {hourly.hour_start}  usage={hourly.usage}L  total={hourly.total}L")
 
 
 if __name__ == "__main__":
