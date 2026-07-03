@@ -9,6 +9,7 @@ import datetime
 
 from thameswaterapi import (
     ThamesWater,
+    get_tariff,
     lines_to_timeseries,
     meter_usage_lines_to_timeseries,
 )
@@ -18,8 +19,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Retrieve meter data from Thames Water"
     )
-    parser.add_argument("email", help="Thames Water account email")
-    parser.add_argument("password", help="Thames Water account password")
+    parser.add_argument(
+        "email", nargs="?", help="Thames Water account email"
+    )
+    parser.add_argument(
+        "password", nargs="?", help="Thames Water account password"
+    )
+    parser.add_argument(
+        "--tariff",
+        action="store_true",
+        help="Print the current metered-household tariff (needs no credentials) and exit",
+    )
     parser.add_argument(
         "--account-number",
         type=int,
@@ -41,6 +51,20 @@ def main() -> None:
         help="Meter serial number to query (defaults to first meter)",
     )
     args = parser.parse_args()
+
+    if args.tariff:
+        tariff = get_tariff()
+        print(f"Clean water:  £{tariff.clean_water_rate_per_m3}/m3")
+        print(f"Wastewater:   £{tariff.wastewater_rate_per_m3}/m3")
+        print(f"Volumetric:   £{tariff.volumetric_rate_per_m3}/m3 "
+              f"(£{tariff.unit_rate_per_litre:.7f}/L)")
+        print(f"Fixed charge: £{tariff.water_fixed_per_year}/yr water + "
+              f"£{tariff.wastewater_fixed_per_year}/yr wastewater "
+              f"(£{tariff.standing_charge_per_day}/day)")
+        return
+
+    if not args.email or not args.password:
+        parser.error("email and password are required unless --tariff is used")
 
     tw = ThamesWater(
         email=args.email,

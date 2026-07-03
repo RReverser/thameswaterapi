@@ -58,6 +58,30 @@ for r in readings:
     print(r.hour_start, r.usage, r.total)
 ```
 
+### Tariff
+
+Thames Water has no tariff API — metered charges are a fixed annual "Scheme of
+Charges" published per region (identical for every customer), so the figures are
+scraped from Thames Water's public metered-customers help page and need no
+authentication:
+
+```python
+from thameswaterapi import get_tariff
+
+tariff = get_tariff()
+tariff.clean_water_rate_per_m3      # 2.7346
+tariff.wastewater_rate_per_m3       # 1.4721
+tariff.water_fixed_per_year         # 66.87
+tariff.wastewater_fixed_per_year    # 128.13  (standard rate, not the rebate)
+
+tariff.volumetric_rate_per_m3       # combined GBP/m3
+tariff.unit_rate_per_litre          # combined GBP/L
+tariff.standing_charge_per_day      # combined fixed charge GBP/day
+```
+
+`ThamesWater.get_tariff()` is also available on an authenticated client (it
+reuses the session).
+
 ## Command line
 
 ```
