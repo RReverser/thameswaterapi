@@ -4,6 +4,7 @@ import base64
 import hashlib
 import datetime
 import json
+import re
 from typing import Optional, Literal
 import logging
 from dataclasses import dataclass, field, fields
@@ -14,6 +15,18 @@ import requests
 
 class AuthenticationError(Exception):
     """Raised when authentication with Thames Water fails."""
+
+
+class TariffError(Exception):
+    """Raised when the tariff page cannot be fetched or parsed."""
+
+
+# Public help page carrying the current metered-household Scheme of Charges.
+# The figures are region-wide (identical for every customer) and need no auth.
+TARIFF_URL = (
+    "https://www.thameswater.co.uk/help/account-and-billing/"
+    "understand-your-bill/metered-customers"
+)
 
 
 @dataclass
@@ -132,6 +145,39 @@ class Account:
 
 
 @dataclass
+class Tariff:
+    """Metered-household tariff for the Thames Water region.
+
+    Thames Water has no tariff API; metered charges are a fixed annual
+    "Scheme of Charges" published per region, so the same figures apply to
+    every customer. They are scraped from the public help page (see
+    :func:`get_tariff`).
+    """
+
+    clean_water_rate_per_m3: float
+    wastewater_rate_per_m3: float
+    water_fixed_per_year: float
+    wastewater_fixed_per_year: float
+
+    @property
+    def volumetric_rate_per_m3(self) -> float:
+        """Combined clean water + wastewater volumetric rate (GBP/m3)."""
+        return round(self.clean_water_rate_per_m3 + self.wastewater_rate_per_m3, 4)
+
+    @property
+    def unit_rate_per_litre(self) -> float:
+        """Combined volumetric rate expressed per litre (GBP/L)."""
+        return (self.clean_water_rate_per_m3 + self.wastewater_rate_per_m3) / 1000
+
+    @property
+    def standing_charge_per_day(self) -> float:
+        """Combined fixed/standing charge expressed per day (GBP/day)."""
+        return round(
+            (self.water_fixed_per_year + self.wastewater_fixed_per_year) / 365, 4
+        )
+
+
+@dataclass
 class Measurement:
     start: datetime.date
     usage: int  # Usage
@@ -206,6 +252,78 @@ def parse_account(data: dict) -> Account:
         )
 
     return Account(**_filter_known_fields(Account, data))
+
+
+def _search_tariff_float(pattern: str, text: str, description: str) -> float:
+    """Return the first captured group of ``pattern`` in ``text`` as a float."""
+    match = re.search(pattern, text)
+    if match is None:
+        raise TariffError(
+            f"Could not find {description} on the Thames Water tariff page "
+            "(the page markup may have changed)"
+        )
+    return float(match.group(1))
+
+
+def parse_tariff(html: str) -> Tariff:
+    """Parse the metered-customers help page HTML into a :class:`Tariff`.
+
+    The figures live inside markup (``<strong>`` tags and a table); stripping
+    tags and collapsing whitespace leaves each value adjacent to its label,
+    which the regexes below anchor on.
+    """
+    text = re.sub(r"<[^>]+>", " ", html).replace('\\"', '"')
+    text = re.sub(r"\s+", " ", text)
+
+    return Tariff(
+        clean_water_rate_per_m3=_search_tariff_float(
+            r"£([0-9]+\.[0-9]+) per m3 for clean water",
+            text,
+            "the clean water volumetric rate",
+        ),
+        wastewater_rate_per_m3=_search_tariff_float(
+            r"£([0-9]+\.[0-9]+) per m3 for wastewater",
+            text,
+            "the wastewater volumetric rate",
+        ),
+        water_fixed_per_year=_search_tariff_float(
+            r"Water £([0-9]+\.[0-9]+) Not applicable",
+            text,
+            "the water fixed charge",
+        ),
+        # The wastewater row lists the standard fixed charge first and the
+        # (lower) surface-water-drainage rebate charge second; take the standard.
+        wastewater_fixed_per_year=_search_tariff_float(
+            r"Wastewater £([0-9]+\.[0-9]+) £",
+            text,
+            "the wastewater fixed charge",
+        ),
+    )
+
+
+def get_tariff(session: Optional[requests.Session] = None) -> Tariff:
+    """Fetch and parse the current metered-household tariff.
+
+    Needs no authentication (the figures are region-wide), so it can be called
+    without a :class:`ThamesWater` instance. A ``requests.Session`` may be
+    passed to reuse an existing connection.
+    """
+    getter = session.get if session is not None else requests.get
+    try:
+        r = getter(
+            TARIFF_URL,
+            headers={
+                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+    except requests.RequestException as err:
+        raise TariffError(
+            f"Failed to fetch the Thames Water tariff page: {err}"
+        ) from err
+    return parse_tariff(r.text)
 
 
 def parse_meters_response(data: dict) -> MetersResponse:
@@ -577,6 +695,15 @@ class ThamesWater:
         r.raise_for_status()
 
         return parse_account(r.json())
+
+    def get_tariff(self) -> Tariff:
+        """Return the current metered-household tariff for the region.
+
+        The figures are region-wide and need no authentication; this reuses the
+        client's session for convenience. See the module-level
+        :func:`get_tariff` for a credential-free alternative.
+        """
+        return get_tariff(self.s)
 
 
 def _parse_line_label_as_date(label: str, today: datetime.date) -> datetime.date:
