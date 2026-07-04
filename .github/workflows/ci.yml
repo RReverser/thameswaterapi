@@ -18,6 +18,16 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
 
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install mypy types-requests .
+      - run: mypy thameswaterapi/ test_data_retrieval.py test_live.py test_tariff.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
