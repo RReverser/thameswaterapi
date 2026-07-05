@@ -1,0 +1,4 @@
+test_command = "python3 -m subunit.run test_data_retrieval test_tariff $IDOPTION $LISTOPT"
+test_id_option = "--load-list $IDFILE"
+test_list_option = "--list"
+group_regex = "^(.*)\\.[^.]+$"
