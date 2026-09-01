@@ -79,6 +79,7 @@ tariff.clean_water_rate_per_m3  # 2.7346
 tariff.wastewater_rate_per_m3  # 1.4721
 tariff.water_fixed_per_year  # 66.87
 tariff.wastewater_fixed_per_year  # 128.13  (standard rate, not the rebate)
+tariff.effective_date  # datetime.date(2026, 4, 1)
 
 tariff.volumetric_rate_per_m3  # combined GBP/m3
 tariff.unit_rate_per_litre  # combined GBP/L
