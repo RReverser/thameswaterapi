@@ -1,4 +1,5 @@
 import datetime
+import json
 import typing
 import unittest
 from unittest import mock
@@ -42,15 +43,12 @@ def _response(
 
 def _client(*responses: requests.Response) -> ThamesWater:
     """A client whose session replays ``responses`` without authenticating."""
-    client = ThamesWater.__new__(ThamesWater)
+    client = ThamesWater("user@example.com", "hunter2")
     client.s = mock.Mock(spec=requests.Session)
     if len(responses) == 1:
         client.s.request.return_value = responses[0]
     else:
         client.s.request.side_effect = responses
-    client.timeout = 30.0
-    client.client_id = "test-client-id"
-    client._refresh_token = None
     return client
 
 
@@ -63,11 +61,7 @@ class TestRequestClassification(unittest.TestCase):
         self.assertEqual(client.s.request.call_args.kwargs["timeout"], 30.0)
 
     def test_the_session_carries_the_user_agent(self):
-        with (
-            mock.patch.object(ThamesWater, "_authenticate"),
-            mock.patch.object(ThamesWater, "_visit_meter_page"),
-        ):
-            client = ThamesWater("user@example.com", "hunter2", account_number=1)
+        client = ThamesWater("user@example.com", "hunter2")
         self.assertIn("Mozilla/5.0", client.s.headers["user-agent"])
 
     def test_per_call_headers_are_passed_through_untouched(self):
@@ -354,6 +348,188 @@ class TestRefreshTokenGrant(unittest.TestCase):
         client._refresh_token = None
         with self.assertRaises(ValueError):
             client._refresh_token_grant()
+
+
+class TestAuthenticationLadder(unittest.TestCase):
+    """Each step has its own signal; none infers anything from a data call."""
+
+    ID_TOKEN = "header.eyJleHRlbnNpb25fRGVmYXVsdENvbnRyYWN0QWNjb3VudE51bWJlciI6ICI5MDAwMDAwMDAwMDAifQ.sig"
+
+    def _client_for_ladder(self, *responses):
+        client = _client(*responses)
+        client._establish_myaccount_session = mock.Mock()
+        client._visit_meter_page = mock.Mock()
+        client._authenticate_with_password = mock.Mock(return_value=self.ID_TOKEN)
+        return client
+
+    def test_refresh_token_is_tried_first(self):
+        client = self._client_for_ladder(
+            _response(
+                body=json.dumps({"id_token": self.ID_TOKEN, "refresh_token": "r2"})
+            )
+        )
+        client._refresh_token = "r1"
+        client.authenticate()
+        self.assertEqual(client.refresh_token, "r2")
+        client._authenticate_with_password.assert_not_called()
+        self.assertEqual(client.account_number, 900000000000)
+
+    def test_a_spent_refresh_token_falls_through_to_silent_authorize(self):
+        client = self._client_for_ladder(
+            _response(status=400, body='{"error": "invalid_grant"}'),
+            _response(
+                status=302,
+                headers={"Location": f"https://x/#id_token={self.ID_TOKEN}"},
+            ),
+        )
+        client._refresh_token = "spent"
+        client.authenticate()
+        client._authenticate_with_password.assert_not_called()
+
+    def test_no_live_session_falls_through_to_the_password(self):
+        client = self._client_for_ladder(
+            _response(
+                status=302,
+                headers={
+                    "Location": "https://x/#error=interaction_required"
+                    "&error_description=AADB2C90077"
+                },
+            )
+        )
+        client.authenticate()
+        client._authenticate_with_password.assert_called_once()
+
+    def test_silent_authorize_uses_prompt_none_without_following(self):
+        client = self._client_for_ladder(
+            _response(status=302, headers={"Location": "https://x/#error=x"})
+        )
+        client.authenticate()
+        call = client.s.request.call_args_list[0]
+        self.assertEqual(call.kwargs["params"]["prompt"], "none")
+        self.assertEqual(call.kwargs["params"]["response_type"], "id_token")
+        self.assertFalse(call.kwargs["allow_redirects"])
+
+    def test_an_unrecognisable_silent_authorize_answer_is_malformed(self):
+        client = self._client_for_ladder(
+            _response(status=302, headers={"Location": "https://x/"})
+        )
+        with self.assertRaises(MalformedResponse):
+            client.authenticate()
+
+    def test_a_data_call_establishes_a_session_by_itself(self):
+        client = self._client_for_ladder(
+            _response(body=json.dumps(TestDeserializeMeterUsage.SAMPLE_JSON))
+        )
+        client._refresh_token = None
+        client._authenticate_silently = mock.Mock(return_value=None)
+
+        client.get_meters()
+
+        client._authenticate_with_password.assert_called_once()
+        client._visit_meter_page.assert_called_once()
+
+    def test_a_session_serves_every_later_call(self):
+        meters = json.dumps(TestDeserializeMeterUsage.SAMPLE_JSON)
+        client = self._client_for_ladder(_response(body=meters), _response(body=meters))
+        client._refresh_token = None
+        client._authenticate_silently = mock.Mock(return_value=None)
+
+        client.get_meters()
+        client.get_meters()
+
+        # Establishing it is what the first call does; the second just uses it.
+        client._authenticate_with_password.assert_called_once()
+        self.assertEqual(client.s.request.call_count, 2)
+
+
+class TestMeterPageVisit(unittest.TestCase):
+    """The meter page is visited on a state change, not per request."""
+
+    def _authenticated_client(self, *responses):
+        client = _client(*responses)
+        client._authenticated = True
+        client._account_number = 1
+        client._meter_page_visited = True
+        return client
+
+    def test_changing_the_account_issues_nothing_by_itself(self):
+        # Assigning an attribute should not make an HTTP request.
+        client = self._authenticated_client(_response())
+        client.account_number = 2
+        client.s.request.assert_not_called()
+        self.assertFalse(client._meter_page_visited)
+
+    def test_the_next_call_rescopes_the_session(self):
+        meters = json.dumps(TestDeserializeMetersResponse.SAMPLE_JSON)
+        client = self._authenticated_client(
+            _response(body="<html>the meter page</html>"), _response(body=meters)
+        )
+        client.account_number = 2
+
+        client.get_meters()
+
+        visit = client.s.request.call_args_list[0]
+        self.assertEqual(visit.kwargs["params"], {"contractAccountNumber": 2})
+        self.assertTrue(client._meter_page_visited)
+
+    def test_setting_the_same_account_changes_nothing(self):
+        client = self._authenticated_client(_response())
+        client.account_number = 1
+        self.assertTrue(client._meter_page_visited)
+        client.s.request.assert_not_called()
+
+    def test_a_scoped_session_is_not_revisited(self):
+        meters = json.dumps(TestDeserializeMetersResponse.SAMPLE_JSON)
+        client = self._authenticated_client(_response(body=meters))
+
+        client.get_meters()
+
+        # One request: the data call, with no visit in front of it.
+        self.assertEqual(client.s.request.call_count, 1)
+
+    def test_a_failed_visit_is_retried_on_the_next_call(self):
+        meters = json.dumps(TestDeserializeMetersResponse.SAMPLE_JSON)
+        client = self._authenticated_client(
+            _response(status=500, body="nope"),
+            _response(body="<html>the meter page</html>"),
+            _response(body=meters),
+        )
+        client.account_number = 2
+
+        with self.assertRaises(MalformedResponse):
+            client.get_meters()
+        self.assertFalse(client._meter_page_visited)
+
+        client.get_meters()
+        self.assertTrue(client._meter_page_visited)
+
+    def test_get_meters_sends_no_account_number_in_the_referer(self):
+        # The session resolves the account; the header is not load-bearing.
+        client = _client(
+            _response(body=json.dumps(TestDeserializeMeterUsage.SAMPLE_JSON))
+        )
+        client._authenticated = True
+        client._account_number = 1
+        client.get_meters()
+        referer = client.s.request.call_args.kwargs["headers"]["Referer"]
+        self.assertNotIn("contractAccountNumber", referer)
+
+
+class TestSessionPersistence(unittest.TestCase):
+    def test_cookies_round_trip(self):
+        client = ThamesWater("user@example.com", "hunter2")
+        client.s.cookies.set(
+            "x-ms-cpim-trans", "abc", domain="login.thameswater.co.uk", path="/"
+        )
+        restored = ThamesWater("user@example.com", "hunter2", cookies=client.cookies)
+        self.assertEqual(restored.cookies, client.cookies)
+
+    def test_constructor_does_not_authenticate(self):
+        client = ThamesWater("user@example.com", "hunter2", refresh_token="r1")
+        self.assertEqual(client.refresh_token, "r1")
+        # Nothing has been asked for, so no session and no account number.
+        with self.assertRaises(ValueError):
+            client.account_number
 
 
 class TestSelfAssertedStep(unittest.TestCase):
