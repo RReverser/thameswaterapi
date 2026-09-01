@@ -348,6 +348,25 @@ class TestSelfAssertedStep(unittest.TestCase):
             self._sign_in("<html>gateway error</html>")
 
 
+class TestConfirmedStep(unittest.TestCase):
+    """The authorization code is read from the Location header, unfollowed."""
+
+    LOCATION = "https://www.thameswater.co.uk/login#code=abc123&state=s&client_info=1"
+
+    def test_reads_code_without_following(self):
+        client = _client(_response(status=302, headers={"Location": self.LOCATION}))
+        code = client._confirmed_b2c_1_tw_website_signin("trans", "csrf")
+        self.assertEqual(code, "abc123")
+        self.assertFalse(client.s.request.call_args.kwargs["allow_redirects"])
+
+    def test_missing_code_is_malformed(self):
+        client = _client(
+            _response(status=302, headers={"Location": "https://www.example.invalid/"})
+        )
+        with self.assertRaises(MalformedResponse):
+            client._confirmed_b2c_1_tw_website_signin("trans", "csrf")
+
+
 class TestParseLineLabelAsDate(unittest.TestCase):
     def test_january(self):
         self.assertEqual(
