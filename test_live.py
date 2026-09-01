@@ -65,20 +65,39 @@ class TestLiveIntegration(unittest.TestCase):
         self.assertIsInstance(account.currentBalance, (int, float))
 
     def test_get_meter_usage_hourly(self):
-        end = datetime.datetime.now(
+        day = datetime.datetime.now(
             tz=zoneinfo.ZoneInfo("Europe/London")
-        ) - datetime.timedelta(days=3)
-        start = end - datetime.timedelta(days=1)
-        usage = self.tw.get_meter_usage(self.meter, start, end)
+        ).date() - datetime.timedelta(days=3)
+        usage = self.tw.get_meter_usage(self.meter, day, day)
         self.assertFalse(usage.IsError)
         self.assertGreater(len(usage.Lines), 0)
         self.assertGreaterEqual(len(usage.Lines), 20)
-        readings = meter_usage_lines_to_timeseries(start, usage.Lines)
+        readings = meter_usage_lines_to_timeseries(day, usage.Lines)
         self.assertEqual(len(readings), len(usage.Lines))
+        self.assertEqual(len({r.hour_start for r in readings}), len(readings))
         for r in readings:
             self.assertIsInstance(r.hour_start, datetime.datetime)
+            self.assertEqual(r.hour_start.date(), day)
             self.assertIsInstance(r.usage, int)
             self.assertIsInstance(r.total, int)
+
+    def test_get_meter_usage_hourly_over_several_days(self):
+        end = datetime.datetime.now(
+            tz=zoneinfo.ZoneInfo("Europe/London")
+        ).date() - datetime.timedelta(days=3)
+        start = end - datetime.timedelta(days=5)
+        usage = self.tw.get_meter_usage(self.meter, start, end)
+        readings = meter_usage_lines_to_timeseries(start, usage.Lines)
+
+        self.assertEqual(len(readings), len(usage.Lines))
+        self.assertEqual(len({r.hour_start for r in readings}), len(readings))
+        self.assertGreater(len({r.hour_start.date() for r in readings}), 1)
+        # The response is truncated on a day boundary, never padded, so every
+        # day it does carry is a whole one.
+        self.assertEqual(readings[0].hour_start.date(), start)
+        for reading in readings:
+            self.assertGreaterEqual(reading.hour_start.date(), start)
+            self.assertLessEqual(reading.hour_start.date(), end)
 
 
 def main():

@@ -9,7 +9,6 @@ from thameswaterapi import (
     HourlyMeasurement,
     Line,
     Measurement,
-    _date_range,
     _decode_jwt_payload,
     _parse_line_label_as_date,
     lines_to_timeseries,
@@ -277,45 +276,10 @@ class TestLinesToTimeseries(unittest.TestCase):
         self.assertEqual(result[0].total, 1000)
 
 
-class TestDateRange(unittest.TestCase):
-    def test_basic_hourly(self):
-        result = _date_range(
-            datetime.datetime(2026, 2, 10),  # noqa: DTZ001
-            datetime.datetime(2026, 2, 10, 3),  # noqa: DTZ001
-        )
-        tz = zoneinfo.ZoneInfo("Europe/London")
-        self.assertEqual(len(result), 4)
-        self.assertEqual(result[0], datetime.datetime(2026, 2, 10, 0, tzinfo=tz))
-        self.assertEqual(result[1], datetime.datetime(2026, 2, 10, 1, tzinfo=tz))
-        self.assertEqual(result[3], datetime.datetime(2026, 2, 10, 3, tzinfo=tz))
-
-    def test_date_inputs_promoted_to_datetime(self):
-        result = _date_range(
-            datetime.date(2026, 2, 10),
-            datetime.date(2026, 2, 10),
-        )
-        tz = zoneinfo.ZoneInfo("Europe/London")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0], datetime.datetime(2026, 2, 10, 0, tzinfo=tz))
-
-    def test_rejects_timezone_aware_input(self):
-        tz = zoneinfo.ZoneInfo("Europe/London")
-        with self.assertRaises(ValueError):
-            _date_range(
-                datetime.datetime(2026, 2, 10, tzinfo=tz),
-                datetime.datetime(2026, 2, 10, 3, tzinfo=tz),
-            )
-
-    def test_empty_when_end_before_start(self):
-        result = _date_range(
-            datetime.datetime(2026, 2, 11),  # noqa: DTZ001
-            datetime.datetime(2026, 2, 10),  # noqa: DTZ001
-        )
-        self.assertEqual(result, [])
-
-
 class TestMeterUsageLinesToTimeseries(unittest.TestCase):
-    def _make_line(self, label, usage, read):
+    TZ = zoneinfo.ZoneInfo("Europe/London")
+
+    def _make_line(self, label, usage=1.0, read=1.0):
         return Line(
             Label=label,
             Usage=usage,
@@ -324,6 +288,12 @@ class TestMeterUsageLinesToTimeseries(unittest.TestCase):
             MeterSerialNumberHis="100000001",
         )
 
+    def _day(self, labels):
+        return [self._make_line(label) for label in labels]
+
+    def _whole_day(self, skip=()):
+        return self._day([f"{hour}:00" for hour in range(24) if hour not in skip])
+
     def test_basic(self):
         lines = [
             self._make_line("0:00", 10.0, 22237.0),
@@ -331,12 +301,11 @@ class TestMeterUsageLinesToTimeseries(unittest.TestCase):
             self._make_line("2:00", 6.0, 22243.0),
         ]
         result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
-        tz = zoneinfo.ZoneInfo("Europe/London")
         self.assertEqual(len(result), 3)
         self.assertEqual(
             result[0],
             HourlyMeasurement(
-                hour_start=datetime.datetime(2026, 2, 10, 0, tzinfo=tz),
+                hour_start=datetime.datetime(2026, 2, 10, 0, tzinfo=self.TZ),
                 usage=10,
                 total=22237,
             ),
@@ -344,7 +313,7 @@ class TestMeterUsageLinesToTimeseries(unittest.TestCase):
         self.assertEqual(
             result[2],
             HourlyMeasurement(
-                hour_start=datetime.datetime(2026, 2, 10, 2, tzinfo=tz),
+                hour_start=datetime.datetime(2026, 2, 10, 2, tzinfo=self.TZ),
                 usage=6,
                 total=22243,
             ),
@@ -360,6 +329,135 @@ class TestMeterUsageLinesToTimeseries(unittest.TestCase):
         result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
         self.assertEqual(result[0].usage, 99)
         self.assertEqual(result[0].total, 1000)
+
+    def test_a_multi_day_response_advances_a_day_at_each_midnight(self):
+        lines = self._whole_day() + self._whole_day() + self._whole_day()
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
+
+        self.assertEqual(len(result), 72)
+        self.assertEqual(
+            result[0].hour_start, datetime.datetime(2026, 2, 10, 0, tzinfo=self.TZ)
+        )
+        self.assertEqual(
+            result[23].hour_start, datetime.datetime(2026, 2, 10, 23, tzinfo=self.TZ)
+        )
+        self.assertEqual(
+            result[24].hour_start, datetime.datetime(2026, 2, 11, 0, tzinfo=self.TZ)
+        )
+        self.assertEqual(
+            result[71].hour_start, datetime.datetime(2026, 2, 12, 23, tzinfo=self.TZ)
+        )
+
+    def test_a_spring_day_of_23_hours_places_all_23(self):
+        # 29 March 2026 has no 1:00 local: the clocks go forward at 1:00.
+        spring = self._whole_day(skip={1})
+        lines = self._whole_day() + spring + self._whole_day()
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 3, 28), lines)
+
+        self.assertEqual(len(result), 71)
+        spring_day = [
+            measurement
+            for measurement in result
+            if measurement.hour_start.date() == datetime.date(2026, 3, 29)
+        ]
+        self.assertEqual(len(spring_day), 23)
+        # The day after still starts where it should, despite the short day.
+        self.assertEqual(
+            result[-1].hour_start, datetime.datetime(2026, 3, 30, 23, tzinfo=self.TZ)
+        )
+
+    def test_an_autumn_day_of_25_hours_keeps_both_ones(self):
+        # 25 October 2026 has 1:00 twice: the clocks go back at 2:00, so the
+        # first is BST and the second GMT, an hour apart in real time.
+        autumn = self._day(
+            ["0:00", "1:00", "1:00"] + [f"{hour}:00" for hour in range(2, 24)]
+        )
+        lines = self._whole_day() + autumn + self._whole_day()
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 10, 24), lines)
+
+        self.assertEqual(len(result), 73)
+        autumn_day = [
+            measurement
+            for measurement in result
+            if measurement.hour_start.date() == datetime.date(2026, 10, 25)
+        ]
+        self.assertEqual(len(autumn_day), 25)
+
+        first, second = autumn_day[1], autumn_day[2]
+        self.assertEqual(first.hour_start.utcoffset(), datetime.timedelta(hours=1))
+        self.assertEqual(second.hour_start.utcoffset(), datetime.timedelta(0))
+        self.assertEqual(
+            second.hour_start.astimezone(datetime.timezone.utc)
+            - first.hour_start.astimezone(datetime.timezone.utc),
+            datetime.timedelta(hours=1),
+        )
+
+        # Every reading in the window keeps its own instant, and the day
+        # after still starts where it should.
+        instants = [
+            measurement.hour_start.astimezone(datetime.timezone.utc)
+            for measurement in result
+        ]
+        self.assertEqual(len(set(instants)), len(instants))
+        self.assertEqual(instants, sorted(instants))
+        self.assertEqual(
+            result[-1].hour_start, datetime.datetime(2026, 10, 26, 23, tzinfo=self.TZ)
+        )
+
+    def test_a_repeated_label_on_an_ordinary_day_is_left_alone(self):
+        # fold only means anything inside an ambiguous hour, so a duplicate
+        # anywhere else stays where it was rather than moving an hour.
+        lines = self._day(["0:00", "1:00", "1:00"])
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
+
+        self.assertEqual(
+            result[1].hour_start.astimezone(datetime.timezone.utc),
+            result[2].hour_start.astimezone(datetime.timezone.utc),
+        )
+
+    def test_hours_missing_from_the_middle_keep_their_true_hour(self):
+        lines = self._day(["0:00", "1:00", "14:00", "23:00"]) + self._whole_day()
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
+
+        self.assertEqual(
+            [measurement.hour_start for measurement in result[:4]],
+            [
+                datetime.datetime(2026, 2, 10, 0, tzinfo=self.TZ),
+                datetime.datetime(2026, 2, 10, 1, tzinfo=self.TZ),
+                datetime.datetime(2026, 2, 10, 14, tzinfo=self.TZ),
+                datetime.datetime(2026, 2, 10, 23, tzinfo=self.TZ),
+            ],
+        )
+        # The short day does not drag the next one back with it.
+        self.assertEqual(
+            result[4].hour_start, datetime.datetime(2026, 2, 11, 0, tzinfo=self.TZ)
+        )
+
+    def test_a_truncated_response_places_every_day_it_carries(self):
+        # Six days were asked for; three came back, the tail simply absent.
+        lines = self._whole_day() * 3
+        result = meter_usage_lines_to_timeseries(datetime.date(2026, 2, 10), lines)
+
+        self.assertEqual(len(result), 72)
+        self.assertEqual(
+            result[-1].hour_start, datetime.datetime(2026, 2, 12, 23, tzinfo=self.TZ)
+        )
+
+    def test_a_datetime_start_uses_its_date(self):
+        lines = [self._make_line("6:00")]
+        result = meter_usage_lines_to_timeseries(
+            datetime.datetime(2026, 2, 10, 18, 30),  # noqa: DTZ001
+            lines,
+        )
+        self.assertEqual(
+            result[0].hour_start, datetime.datetime(2026, 2, 10, 6, tzinfo=self.TZ)
+        )
+
+    def test_an_unparseable_label(self):
+        with self.assertRaises(ValueError):
+            meter_usage_lines_to_timeseries(
+                datetime.date(2026, 2, 10), [self._make_line("noon")]
+            )
 
 
 class TestParseAccount(unittest.TestCase):

@@ -49,14 +49,20 @@ import datetime
 from thameswaterapi import meter_usage_lines_to_timeseries
 
 meter = thames_water.get_meter_numbers()[0]
-start = datetime.datetime(2024, 10, 1)
-end = datetime.datetime(2024, 10, 2)
+start = datetime.date(2024, 10, 1)
+end = datetime.date(2024, 10, 31)
 
 meter_usage = thames_water.get_meter_usage(meter, start, end)
 readings = meter_usage_lines_to_timeseries(start, meter_usage.Lines)
 for r in readings:
     print(r.hour_start, r.usage, r.total)
 ```
+
+A window of any width works. Hourly labels are clock times that repeat every
+day, so `meter_usage_lines_to_timeseries` takes the hour from the label and the
+day from a cursor that advances at every `0:00`. A window ending today is
+truncated at a whole-day boundary rather than padded, so the days that have not
+been published yet are simply absent from the result.
 
 ### Tariff
 
