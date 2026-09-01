@@ -491,6 +491,7 @@ class ThamesWater:
         self.s.headers["user-agent"] = USER_AGENT
         self.client_id = client_id
         self.timeout = timeout
+        self._refresh_token: Optional[str] = None
 
         self._authenticate(email, password)
 
@@ -533,6 +534,20 @@ class ThamesWater:
             return parse(payload)
         except (AttributeError, KeyError, TypeError, ValueError) as err:
             raise MalformedResponse(r, f"unexpected response body: {err}") from err
+
+    @property
+    def refresh_token(self) -> Optional[str]:
+        """The refresh token currently held, for a caller that persists it.
+
+        The grant rotates it on every use, so read it back after every
+        authentication and store whatever it now is.
+        """
+        return self._refresh_token
+
+    def _store_tokens(self, tokens: TokenResponse) -> None:
+        """Keep the rotated refresh token; the previous one is spent."""
+        if tokens.refresh_token is not None:
+            self._refresh_token = tokens.refresh_token
 
     def logout(self) -> None:
         """End the B2C session.
@@ -622,7 +637,9 @@ class ThamesWater:
             )
         return fragment_params["code"][0]
 
-    def _get_oauth2_code_b2c_1_tw_website_signin(self, confirmation_code: str):
+    def _get_oauth2_code_b2c_1_tw_website_signin(
+        self, confirmation_code: str
+    ) -> TokenResponse:
         url = TOKEN_ENDPOINT
 
         headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
@@ -642,16 +659,29 @@ class ThamesWater:
             "code": confirmation_code,
         }
 
-        self.oauth_request_tokens = self._request_json(
+        tokens = self._request_json(
             "POST", url, _parse_id_token_response, headers=headers, data=data
         )
+        self._store_tokens(tokens)
+        return tokens
 
-    def _refresh_oauth2_token_b2c_1_tw_website_signin(self):
-        url = TOKEN_ENDPOINT
+    def _refresh_token_grant(
+        self,
+        scope: str = "openid profile offline_access",
+        parse: Callable[[dict], TokenResponse] = parse_token_response,
+    ) -> TokenResponse:
+        """Exchange the held refresh token for fresh tokens.
+
+        The grant rotates the refresh token, so the new one is stored the
+        moment it arrives: the previous one is spent and losing the new one
+        costs a password login.
+        """
+        if self._refresh_token is None:
+            raise ValueError("no refresh token held")
 
         data = {
             "client_id": self.client_id,
-            "scope": "openid profile offline_access",
+            "scope": scope,
             "grant_type": "refresh_token",
             "client_info": "1",
             "x-client-SKU": "msal.js.browser",
@@ -659,14 +689,16 @@ class ThamesWater:
             "x-ms-lib-capability": "retry-after, h429",
             "x-client-current-telemetry": "5|61,0,,,|@azure/msal-react,2.0.3",
             "x-client-last-telemetry": "5|0|||0,0",
-            "refresh_token": self.oauth_request_tokens.refresh_token,
+            "refresh_token": self._refresh_token,
         }
 
         headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
 
-        self.oauth_response_tokens = self._request_json(
-            "GET", url, parse_token_response, headers=headers, data=data
+        tokens = self._request_json(
+            "POST", TOKEN_ENDPOINT, parse, headers=headers, data=data
         )
+        self._store_tokens(tokens)
+        return tokens
 
     def _login(self, state: str, id_token: str):
         url = "https://myaccount.thameswater.co.uk/login"
@@ -693,10 +725,9 @@ class ThamesWater:
         confirmation_code = self._confirmed_b2c_1_tw_website_signin(
             trans_token, csrf_token
         )
-        self._get_oauth2_code_b2c_1_tw_website_signin(confirmation_code)
-        self._refresh_oauth2_token_b2c_1_tw_website_signin()
+        tokens = self._get_oauth2_code_b2c_1_tw_website_signin(confirmation_code)
 
-        id_token = self.oauth_request_tokens.id_token
+        id_token = tokens.id_token
         assert id_token is not None  # _parse_id_token_response guarantees it
         self._id_token_claims = _decode_jwt_payload(id_token)
 
@@ -802,29 +833,13 @@ class ThamesWater:
     def _acquire_account_management_api_access_token(self) -> str:
         """Exchange the refresh token for an access token scoped to the
         account-management-api resource."""
-        url = TOKEN_ENDPOINT
-
         scope = (
             f"https://identity.thameswater.co.uk/{ACCOUNT_MANAGEMENT_API_RESOURCE_ID}"
             "/default openid profile offline_access"
         )
 
-        data = {
-            "client_id": self.client_id,
-            "scope": scope,
-            "grant_type": "refresh_token",
-            "client_info": "1",
-            "x-client-SKU": "msal.js.browser",
-            "x-client-VER": "3.1.0",
-            "refresh_token": self.oauth_request_tokens.refresh_token,
-        }
-
-        headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
-
-        tokens = self._request_json(
-            "POST", url, _parse_access_token_response, headers=headers, data=data
-        )
-        assert tokens.access_token is not None
+        tokens = self._refresh_token_grant(scope, _parse_access_token_response)
+        assert tokens.access_token is not None  # the parser guarantees it
         return tokens.access_token
 
     def get_account(self) -> Account:
