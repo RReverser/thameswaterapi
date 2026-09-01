@@ -64,6 +64,15 @@ USER_AGENT = (
 )
 
 
+B2C_USER_FLOW_URL = (
+    "https://login.thameswater.co.uk/identity.thameswater.co.uk/"
+    "b2c_1_tw_website_signin/oauth2/v2.0"
+)
+AUTHORIZATION_ENDPOINT = f"{B2C_USER_FLOW_URL}/authorize"
+TOKEN_ENDPOINT = f"{B2C_USER_FLOW_URL}/token"
+END_SESSION_ENDPOINT = f"{B2C_USER_FLOW_URL}/logout"
+
+
 # Public help page carrying the current metered-household Scheme of Charges.
 # The figures are region-wide (identical for every customer) and need no auth.
 TARIFF_URL = (
@@ -454,7 +463,13 @@ def parse_meters_response(data: dict) -> MetersResponse:
 
 
 def _decode_jwt_payload(token: str) -> dict:
-    """Decode the payload of a JWT without verifying the signature."""
+    """Decode the payload of a JWT without verifying the signature.
+
+    The signature is not checked against the user flow's jwks_uri because
+    the token is fetched over TLS directly from the issuer being
+    authenticated to, and the only claims read are the caller's own account
+    numbers.
+    """
     payload = token.split(".")[1]
     # Add padding for base64
     payload += "=" * (4 - len(payload) % 4)
@@ -519,6 +534,14 @@ class ThamesWater:
         except (AttributeError, KeyError, TypeError, ValueError) as err:
             raise MalformedResponse(r, f"unexpected response body: {err}") from err
 
+    def logout(self) -> None:
+        """End the B2C session.
+
+        The response is a redirect to the post-logout page, which nothing
+        reads; only the server-side session teardown matters.
+        """
+        self._request("GET", END_SESSION_ENDPOINT, allow_redirects=False)
+
     def _generate_pkce(self):
         self.pkce_verifier = (
             base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8").rstrip("=")
@@ -532,7 +555,7 @@ class ThamesWater:
         )
 
     def _authorize_b2c_1_tw_website_signin(self) -> tuple[str, str]:
-        url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/authorize"
+        url = AUTHORIZATION_ENDPOINT
 
         params = {
             "client_id": self.client_id,
@@ -600,7 +623,7 @@ class ThamesWater:
         return fragment_params["code"][0]
 
     def _get_oauth2_code_b2c_1_tw_website_signin(self, confirmation_code: str):
-        url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/token"
+        url = TOKEN_ENDPOINT
 
         headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
 
@@ -624,7 +647,7 @@ class ThamesWater:
         )
 
     def _refresh_oauth2_token_b2c_1_tw_website_signin(self):
-        url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/token"
+        url = TOKEN_ENDPOINT
 
         data = {
             "client_id": self.client_id,
@@ -779,7 +802,7 @@ class ThamesWater:
     def _acquire_account_management_api_access_token(self) -> str:
         """Exchange the refresh token for an access token scoped to the
         account-management-api resource."""
-        url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/token"
+        url = TOKEN_ENDPOINT
 
         scope = (
             f"https://identity.thameswater.co.uk/{ACCOUNT_MANAGEMENT_API_RESOURCE_ID}"

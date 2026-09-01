@@ -7,6 +7,7 @@ import requests
 import zoneinfo
 
 from thameswaterapi import (
+    END_SESSION_ENDPOINT,
     AuthenticationError,
     HourlyMeasurement,
     Line,
@@ -297,6 +298,15 @@ class TestDeserializeMeterUsage(unittest.TestCase):
             result = self._parse(data)
         self.assertFalse(result.IsError)
         self.assertIn("BrandNewField", cm.output[0])
+
+
+class TestLogout(unittest.TestCase):
+    def test_calls_the_end_session_endpoint(self):
+        client = _client(
+            _response(status=302, headers={"Location": "https://www.invalid/"})
+        )
+        client.logout()
+        self.assertEqual(client.s.request.call_args.args, ("GET", END_SESSION_ENDPOINT))
 
 
 class TestSelfAssertedStep(unittest.TestCase):
