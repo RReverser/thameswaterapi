@@ -9,6 +9,7 @@ from unittest import mock
 import requests
 
 from thameswaterapi import (
+    AuthenticationError,
     HourlyMeasurement,
     Line,
     MalformedResponse,
@@ -319,6 +320,32 @@ class TestDecodeJwtPayload(unittest.TestCase):
         # A payload whose length is a multiple of 4 needs no padding added.
         claims = _decode_jwt_payload(self._token("eyJhYiI6IDF9"))
         self.assertEqual(claims, {"ab": 1})
+
+
+class TestSelfAssertedStep(unittest.TestCase):
+    """Bad credentials must fail at the step that rejected them."""
+
+    def _sign_in(self, body: str):
+        client = _client(_response(body=body))
+        return client._self_asserted_b2c_1_tw_website_signin(
+            "user@example.com", "hunter2", "trans", "csrf"
+        )
+
+    def test_rejected_credentials_raise_with_the_server_message(self):
+        with self.assertRaises(AuthenticationError) as cm:
+            self._sign_in('{"status": "400", "message": "Your password is incorrect"}')
+        self.assertIn("Your password is incorrect", str(cm.exception))
+
+    def test_rejected_credentials_without_a_message(self):
+        with self.assertRaises(AuthenticationError):
+            self._sign_in('{"status": "400"}')
+
+    def test_accepted_credentials_return(self):
+        self._sign_in('{"status": "200"}')
+
+    def test_non_json_body_is_malformed(self):
+        with self.assertRaises(MalformedResponse):
+            self._sign_in("<html>gateway error</html>")
 
 
 class TestParseLineLabelAsDate(unittest.TestCase):
