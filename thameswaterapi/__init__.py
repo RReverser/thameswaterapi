@@ -304,6 +304,21 @@ def parse_token_response(data: dict) -> TokenResponse:
     )
 
 
+def _parse_self_asserted_response(data: dict) -> None:
+    """Raise :class:`AuthenticationError` if the credentials were rejected.
+
+    B2C answers a rejected credential with HTTP 200 and a body whose own
+    status field carries the failure, so nothing in the transport layer sees
+    it and it would otherwise surface several requests later as a missing
+    'code' in the redirect fragment.
+    """
+    status = str(data.get("status", ""))
+    if status != "200":
+        raise AuthenticationError(
+            data.get("message") or f"the sign-in step returned status {status!r}"
+        )
+
+
 def _parse_id_token_response(data: dict) -> TokenResponse:
     """Parse a token response that is only useful if it carries an id token."""
     tokens = parse_token_response(data)
@@ -553,9 +568,10 @@ class ThamesWater:
 
         data = {"request_type": "RESPONSE", "email": email, "password": password}
 
-        self._request(
+        self._request_json(
             "POST",
             url,
+            _parse_self_asserted_response,
             params=params,
             data=data,
             headers={"x-csrf-token": csrf_token},
