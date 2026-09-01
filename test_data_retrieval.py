@@ -8,6 +8,7 @@ from thameswaterapi import (
     Line,
     Measurement,
     _date_range,
+    _decode_jwt_payload,
     _parse_line_label_as_date,
     lines_to_timeseries,
     meter_usage_lines_to_timeseries,
@@ -187,6 +188,26 @@ class TestDeserializeMeterUsage(unittest.TestCase):
             result = self._parse(data)
         self.assertFalse(result.IsError)
         self.assertIn("BrandNewField", cm.output[0])
+
+
+class TestDecodeJwtPayload(unittest.TestCase):
+    def _token(self, payload_b64: str) -> str:
+        return f"header.{payload_b64}.signature"
+
+    def test_base64url_alphabet(self):
+        # 'eyJzdWIiOiAiYX1-IH0_In0' carries both '-' and '_'; plain b64decode
+        # discards them instead of translating, yielding shifted bytes.
+        claims = _decode_jwt_payload(self._token("eyJzdWIiOiAiYX1-IH0_In0"))
+        self.assertEqual(claims, {"sub": "a}~ }?"})
+
+    def test_unpadded_payload(self):
+        claims = _decode_jwt_payload(self._token("eyJhIjogMX0"))
+        self.assertEqual(claims, {"a": 1})
+
+    def test_already_padded_length(self):
+        # A payload whose length is a multiple of 4 needs no padding added.
+        claims = _decode_jwt_payload(self._token("eyJhYiI6IDF9"))
+        self.assertEqual(claims, {"ab": 1})
 
 
 class TestParseLineLabelAsDate(unittest.TestCase):
