@@ -587,14 +587,15 @@ class ThamesWater:
             "p": "B2C_1_tw_website_signin",
         }
 
-        r = self._request("GET", url, params=params)
+        # /confirmed emits a single hop carrying the code, and the reply URL
+        # it points at is a page whose body nothing reads, so do not follow it.
+        r = self._request("GET", url, params=params, allow_redirects=False)
 
-        parsed = urlparse(r.url)
-        fragment_params = parse_qs(parsed.fragment)
+        location = r.headers.get("Location", "")
+        fragment_params = parse_qs(urlparse(location).fragment)
         if "code" not in fragment_params:
-            raise AuthenticationError(
-                f"Authentication failed: 'code' not found in redirect URL fragment. "
-                f"URL was: {r.url!r}"
+            raise MalformedResponse(
+                r, f"no 'code' in the redirect fragment; Location was {location!r}"
             )
         return fragment_params["code"][0]
 
