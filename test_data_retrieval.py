@@ -9,6 +9,7 @@ from unittest import mock
 import requests
 
 from thameswaterapi import (
+    END_SESSION_ENDPOINT,
     AuthenticationError,
     HourlyMeasurement,
     Line,
@@ -320,6 +321,15 @@ class TestDecodeJwtPayload(unittest.TestCase):
         # A payload whose length is a multiple of 4 needs no padding added.
         claims = _decode_jwt_payload(self._token("eyJhYiI6IDF9"))
         self.assertEqual(claims, {"ab": 1})
+
+
+class TestLogout(unittest.TestCase):
+    def test_calls_the_end_session_endpoint(self):
+        client = _client(
+            _response(status=302, headers={"Location": "https://www.invalid/"})
+        )
+        client.logout()
+        self.assertEqual(client.s.request.call_args.args, ("GET", END_SESSION_ENDPOINT))
 
 
 class TestSelfAssertedStep(unittest.TestCase):
