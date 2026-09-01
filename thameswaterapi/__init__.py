@@ -11,8 +11,9 @@ import os
 import re
 import uuid
 import zoneinfo
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from typing import Literal
+from typing import Literal, TypeVar
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
@@ -24,6 +25,49 @@ class AuthenticationError(Exception):
 
 class TariffError(Exception):
     """Raised when the tariff page cannot be fetched or parsed."""
+
+
+class RateLimitError(Exception):
+    """Raised when Thames Water responds 429."""
+
+    def __init__(self, retry_after: int | None = None):
+        #: Seconds to wait, when the Retry-After header gave a delay in
+        #: seconds. None when the header was absent or in HTTP-date form.
+        self.retry_after = retry_after
+        super().__init__(
+            "Rate limited by Thames Water"
+            + (f"; retry after {retry_after}s" if retry_after is not None else "")
+        )
+
+
+class MalformedResponse(Exception):
+    """Raised when a response is not what the endpoint is supposed to return.
+
+    Covers a non-2xx status, a non-JSON body, an HTML error page, and JSON
+    whose shape does not match the expected dataclass, as one class. It is
+    never retried and never triggers re-authentication: the caller decides.
+    """
+
+    #: How much of the body to attach, enough to identify what came back.
+    BODY_SNIPPET_LEN = 200
+
+    def __init__(self, response: requests.Response, reason: str):
+        self.status_code = response.status_code
+        self.content_type = response.headers.get("content-type", "")
+        self.body = response.text[: self.BODY_SNIPPET_LEN]
+        super().__init__(
+            f"{reason} (HTTP {self.status_code}, content-type "
+            f"{self.content_type!r}, body starts {self.body!r})"
+        )
+
+
+#: requests has no default timeout of its own, so every call sets one.
+DEFAULT_TIMEOUT = 30.0
+
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+)
 
 
 # Public help page carrying the current metered-household Scheme of Charges.
@@ -176,6 +220,16 @@ class Account:
 
 
 @dataclass
+class TokenResponse:
+    """A B2C token endpoint response, limited to the fields anything reads."""
+
+    id_token: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in: int | None = None
+
+
+@dataclass
 class Tariff:
     """Metered-household tariff for the Thames Water region.
 
@@ -230,10 +284,23 @@ LONDON = zoneinfo.ZoneInfo("Europe/London")
 
 _logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 # Audience (resource app id) for the account-management-api. The app id is
 # specific to Thames Water and is used to scope access tokens for the
 # account-management-api host.
 ACCOUNT_MANAGEMENT_API_RESOURCE_ID = "8a63d7f3-8ff8-4be6-b4cd-c5957e68a9bb"
+
+
+def _parse_retry_after(header: str | None) -> int | None:
+    """Return the Retry-After delay in seconds, or None if not in that form."""
+    if header is None:
+        return None
+    try:
+        return int(header)
+    except ValueError:
+        # The HTTP-date form is legal but has never been observed here.
+        return None
 
 
 def _filter_known_fields(cls: type, data: dict) -> dict:
@@ -254,6 +321,41 @@ def parse_meter_usage(data: dict) -> MeterUsage:
     data = dict(data)
     data["Lines"] = [Line(**line) for line in data["Lines"] or []]
     return MeterUsage(**_filter_known_fields(MeterUsage, data))
+
+
+def parse_token_response(data: dict) -> TokenResponse:
+    """Parse a token endpoint response.
+
+    The endpoint returns a dozen MSAL telemetry and client_info fields that
+    nothing here reads, so the wanted ones are picked out rather than filtered.
+    """
+    if "error" in data:
+        raise ValueError(
+            f"token endpoint returned {data['error']}: "
+            f"{str(data.get('error_description', ''))[:200]}"
+        )
+    return TokenResponse(
+        id_token=data.get("id_token"),
+        access_token=data.get("access_token"),
+        refresh_token=data.get("refresh_token"),
+        expires_in=data.get("expires_in"),
+    )
+
+
+def _parse_id_token_response(data: dict) -> TokenResponse:
+    """Parse a token response that is only useful if it carries an id token."""
+    tokens = parse_token_response(data)
+    if tokens.id_token is None:
+        raise ValueError("no id_token in the token response")
+    return tokens
+
+
+def _parse_access_token_response(data: dict) -> TokenResponse:
+    """Parse a token response that is only useful if it carries an access token."""
+    tokens = parse_token_response(data)
+    if tokens.access_token is None:
+        raise ValueError("no access_token in the token response")
+    return tokens
 
 
 def _parse_address(data: dict | None) -> Address | None:
@@ -356,7 +458,10 @@ def parse_tariff(html: str) -> Tariff:
     )
 
 
-def get_tariff(session: requests.Session | None = None) -> Tariff:
+def get_tariff(
+    session: requests.Session | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Tariff:
     """Fetch and parse the current metered-household tariff.
 
     Needs no authentication (the figures are region-wide), so it can be called
@@ -367,11 +472,8 @@ def get_tariff(session: requests.Session | None = None) -> Tariff:
     try:
         r = getter(
             TARIFF_URL,
-            headers={
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-            },
-            timeout=30,
+            headers={"user-agent": USER_AGENT},
+            timeout=timeout,
         )
         r.raise_for_status()
     except requests.RequestException as err:
@@ -407,9 +509,14 @@ class ThamesWater:
         password: str,
         account_number: int | None = None,
         client_id: str = "cedfde2d-79a7-44fd-9833-cae769640d3d",  # specific to Thames Water
+        timeout: float = DEFAULT_TIMEOUT,
     ):
         self.s = requests.session()
+        # Every request wants it, so the session carries it rather than each
+        # call site or the helper merging it in.
+        self.s.headers["user-agent"] = USER_AGENT
         self.client_id = client_id
+        self.timeout = timeout
 
         self._authenticate(email, password)
 
@@ -420,6 +527,38 @@ class ThamesWater:
         self.account_number = account_number
 
         self._visit_meter_page()
+
+    def _request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Issue a request with the client timeout and classify the outcome.
+
+        3xx is allowed through: the authentication chain reads codes and
+        tokens out of Location headers with ``allow_redirects=False``.
+        """
+        r = self.s.request(method, url, timeout=self.timeout, **kwargs)
+
+        if r.status_code == 429:
+            raise RateLimitError(_parse_retry_after(r.headers.get("Retry-After")))
+        if r.status_code >= 400:
+            raise MalformedResponse(r, "unexpected HTTP status")
+        return r
+
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        parse: Callable[[dict], T],
+        **kwargs,
+    ) -> T:
+        """Issue a request and parse the body into its expected dataclass."""
+        r = self._request(method, url, **kwargs)
+        try:
+            payload = r.json()
+        except ValueError as err:
+            raise MalformedResponse(r, "response body is not JSON") from err
+        try:
+            return parse(payload)
+        except (AttributeError, KeyError, TypeError, ValueError) as err:
+            raise MalformedResponse(r, f"unexpected response body: {err}") from err
 
     def _generate_pkce(self):
         self.pkce_verifier = (
@@ -448,11 +587,15 @@ class ThamesWater:
             "state": str(uuid.uuid4()),
         }
 
-        r = self.s.get(url, params=params)
-        r.raise_for_status()
-        return dict(self.s.cookies)["x-ms-cpim-trans"], dict(self.s.cookies)[
-            "x-ms-cpim-csrf"
-        ]
+        r = self._request("GET", url, params=params)
+
+        cookies = dict(self.s.cookies)
+        try:
+            return cookies["x-ms-cpim-trans"], cookies["x-ms-cpim-csrf"]
+        except KeyError as err:
+            raise MalformedResponse(
+                r, f"the authorize response set no {err} cookie"
+            ) from err
 
     def _self_asserted_b2c_1_tw_website_signin(
         self, email: str, password: str, trans_token: str, csrf_token: str
@@ -466,20 +609,16 @@ class ThamesWater:
 
         data = {"request_type": "RESPONSE", "email": email, "password": password}
 
-        headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-            "x-csrf-token": csrf_token,
-        }
-
-        r = self.s.post(url, params=params, data=data, headers=headers)
-        r.raise_for_status()
+        self._request(
+            "POST",
+            url,
+            params=params,
+            data=data,
+            headers={"x-csrf-token": csrf_token},
+        )
 
     def _confirmed_b2c_1_tw_website_signin(self, trans_token: str, csrf_token: str):
         url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/B2C_1_tw_website_signin/api/CombinedSigninAndSignup/confirmed"
-
-        headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-        }
 
         params = {
             "rememberMe": "false",
@@ -488,8 +627,7 @@ class ThamesWater:
             "p": "B2C_1_tw_website_signin",
         }
 
-        r = self.s.get(url, headers=headers, params=params)
-        r.raise_for_status()
+        r = self._request("GET", url, params=params)
 
         parsed = urlparse(r.url)
         fragment_params = parse_qs(parsed.fragment)
@@ -503,10 +641,7 @@ class ThamesWater:
     def _get_oauth2_code_b2c_1_tw_website_signin(self, confirmation_code: str):
         url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/token"
 
-        headers = {
-            "content-type": "application/x-www-form-urlencoded;charset=utf-8",
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-        }
+        headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
 
         data = {
             "client_id": self.client_id,
@@ -523,9 +658,9 @@ class ThamesWater:
             "code": confirmation_code,
         }
 
-        r = self.s.post(url, headers=headers, data=data)
-        r.raise_for_status()
-        self.oauth_request_tokens = r.json()
+        self.oauth_request_tokens = self._request_json(
+            "POST", url, _parse_id_token_response, headers=headers, data=data
+        )
 
     def _refresh_oauth2_token_b2c_1_tw_website_signin(self):
         url = "https://login.thameswater.co.uk/identity.thameswater.co.uk/b2c_1_tw_website_signin/oauth2/v2.0/token"
@@ -540,14 +675,14 @@ class ThamesWater:
             "x-ms-lib-capability": "retry-after, h429",
             "x-client-current-telemetry": "5|61,0,,,|@azure/msal-react,2.0.3",
             "x-client-last-telemetry": "5|0|||0,0",
-            "refresh_token": self.oauth_request_tokens["refresh_token"],
+            "refresh_token": self.oauth_request_tokens.refresh_token,
         }
 
         headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
 
-        r = self.s.get(url, headers=headers, data=data)
-        r.raise_for_status()
-        self.oauth_response_tokens = r.json()
+        self.oauth_response_tokens = self._request_json(
+            "GET", url, parse_token_response, headers=headers, data=data
+        )
 
     def _login(self, state: str, id_token: str):
         url = "https://myaccount.thameswater.co.uk/login"
@@ -557,13 +692,9 @@ class ThamesWater:
             "id_token": id_token,
         }
 
-        headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-            "content-type": "application/x-www-form-urlencoded",
-        }
+        headers = {"content-type": "application/x-www-form-urlencoded"}
 
-        r = self.s.post(url, data=data, headers=headers)
-        r.raise_for_status()
+        self._request("POST", url, data=data, headers=headers)
 
     def _authenticate(
         self,
@@ -581,7 +712,8 @@ class ThamesWater:
         self._get_oauth2_code_b2c_1_tw_website_signin(confirmation_code)
         self._refresh_oauth2_token_b2c_1_tw_website_signin()
 
-        id_token = self.oauth_request_tokens["id_token"]
+        id_token = self.oauth_request_tokens.id_token
+        assert id_token is not None  # _parse_id_token_response guarantees it
         self._id_token_claims = _decode_jwt_payload(id_token)
 
         # First POST to /login with the id_token to establish a session on
@@ -589,15 +721,12 @@ class ThamesWater:
         # /twservice/Account/SignIn and then to a second B2C authorize page
         # that carries a new state value and contains a fresh id_token in the
         # page body.
-        r = self.s.post(
+        r = self._request(
+            "POST",
             "https://myaccount.thameswater.co.uk/login",
             data={"id_token": id_token, "state": ""},
-            headers={
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-                "content-type": "application/x-www-form-urlencoded",
-            },
+            headers={"content-type": "application/x-www-form-urlencoded"},
         )
-        r.raise_for_status()
 
         parsed = urlparse(r.url)
         query_params = parse_qs(parsed.query)
@@ -623,13 +752,11 @@ class ThamesWater:
 
         This is required for the AJAX endpoints to return data rather than a 500 page.
         """
-        r = self.s.get(
-            f"https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage?contractAccountNumber={self.account_number}",
-            headers={
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-            },
+        self._request(
+            "GET",
+            "https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage",
+            params={"contractAccountNumber": self.account_number},
         )
-        r.raise_for_status()
 
     def get_account_numbers(self) -> list[int]:
         """Return the list of contract account numbers available for this login."""
@@ -651,15 +778,11 @@ class ThamesWater:
         url = "https://myaccount.thameswater.co.uk/ajax/waterMeter/getMeters"
 
         headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
             "Referer": f"https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage?contractAccountNumber={self.account_number}",
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        r = self.s.get(url, headers=headers)
-        r.raise_for_status()
-
-        return parse_meters_response(r.json())
+        return self._request_json("GET", url, parse_meters_response, headers=headers)
 
     def get_meter_usage(
         self,
@@ -684,15 +807,13 @@ class ThamesWater:
         }
 
         headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
             "Referer": "https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage",
             "X-Requested-With": "XMLHttpRequest",
         }
 
-        r = self.s.get(url, params=params, headers=headers)
-        r.raise_for_status()
-
-        return parse_meter_usage(r.json())
+        return self._request_json(
+            "GET", url, parse_meter_usage, params=params, headers=headers
+        )
 
     def _acquire_account_management_api_access_token(self) -> str:
         """Exchange the refresh token for an access token scoped to the
@@ -711,20 +832,16 @@ class ThamesWater:
             "client_info": "1",
             "x-client-SKU": "msal.js.browser",
             "x-client-VER": "3.1.0",
-            "refresh_token": self.oauth_request_tokens["refresh_token"],
+            "refresh_token": self.oauth_request_tokens.refresh_token,
         }
 
         headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
 
-        r = self.s.post(url, headers=headers, data=data)
-        r.raise_for_status()
-        body = r.json()
-        if "access_token" not in body:
-            raise AuthenticationError(
-                "No access_token in response from account-management-api token "
-                f"exchange. Keys: {sorted(body.keys())}"
-            )
-        return body["access_token"]
+        tokens = self._request_json(
+            "POST", url, _parse_access_token_response, headers=headers, data=data
+        )
+        assert tokens.access_token is not None
+        return tokens.access_token
 
     def get_account(self) -> Account:
         """Return account details for the current contract account number.
@@ -737,7 +854,6 @@ class ThamesWater:
         url = "https://account-management-api.prod.p.webapp.thameswater.co.uk/account-management-api/Accounts"
 
         headers = {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
             "Accept": "text/plain",
             "Authorization": f"Bearer {access_token}",
             "content-type": "application/json",
@@ -746,10 +862,7 @@ class ThamesWater:
             "Referer": "https://www.thameswater.co.uk/",
         }
 
-        r = self.s.get(url, headers=headers)
-        r.raise_for_status()
-
-        return parse_account(r.json())
+        return self._request_json("GET", url, parse_account, headers=headers)
 
     def get_tariff(self) -> Tariff:
         """Return the current metered-household tariff for the region.
@@ -758,7 +871,7 @@ class ThamesWater:
         client's session for convenience. See the module-level
         :func:`get_tariff` for a credential-free alternative.
         """
-        return get_tariff(self.s)
+        return get_tariff(self.s, timeout=self.timeout)
 
 
 def _parse_line_label_as_date(label: str, today: datetime.date) -> datetime.date:

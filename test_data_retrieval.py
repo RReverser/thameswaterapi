@@ -4,12 +4,18 @@ import datetime
 import unittest
 import zoneinfo
 from typing import ClassVar
+from unittest import mock
+
+import requests
 
 from thameswaterapi import (
     HourlyMeasurement,
     Line,
+    MalformedResponse,
     Measurement,
     MeterType,
+    RateLimitError,
+    ThamesWater,
     _decode_jwt_payload,
     _parse_line_label_as_date,
     lines_to_timeseries,
@@ -18,6 +24,109 @@ from thameswaterapi import (
     parse_meter_usage,
     parse_meters_response,
 )
+
+
+def _response(
+    status: int = 200,
+    body: str = "{}",
+    content_type: str = "application/json",
+    headers: dict | None = None,
+) -> requests.Response:
+    r = requests.Response()
+    r.status_code = status
+    r._content = body.encode()
+    r.headers["content-type"] = content_type
+    r.headers.update(headers or {})
+    return r
+
+
+def _client(response: requests.Response) -> ThamesWater:
+    """A client whose session returns ``response`` without authenticating."""
+    client = ThamesWater.__new__(ThamesWater)
+    client.s = mock.Mock(spec=requests.Session)
+    client.s.request.return_value = response
+    client.timeout = 30.0
+    return client
+
+
+class TestRequestClassification(unittest.TestCase):
+    """Every response either parses into its dataclass or raises."""
+
+    def test_timeout_applied(self):
+        client = _client(_response())
+        client._request("GET", "https://example.invalid/")
+        self.assertEqual(client.s.request.call_args.kwargs["timeout"], 30.0)
+
+    def test_the_session_carries_the_user_agent(self):
+        with (
+            mock.patch.object(ThamesWater, "_authenticate"),
+            mock.patch.object(ThamesWater, "_visit_meter_page"),
+        ):
+            client = ThamesWater("user@example.com", "hunter2", account_number=1)
+        self.assertIn("Mozilla/5.0", client.s.headers["user-agent"])
+
+    def test_per_call_headers_are_passed_through_untouched(self):
+        client = _client(_response())
+        client._request("GET", "https://example.invalid/", headers={"Referer": "x"})
+        self.assertEqual(client.s.request.call_args.kwargs["headers"], {"Referer": "x"})
+
+    def test_redirect_is_not_an_error(self):
+        # The authentication chain reads codes out of Location headers.
+        client = _client(_response(status=302, headers={"Location": "https://x/#c=1"}))
+        r = client._request("GET", "https://example.invalid/", allow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+
+    def test_rate_limit(self):
+        client = _client(_response(status=429, headers={"Retry-After": "120"}))
+        with self.assertRaises(RateLimitError) as cm:
+            client._request("GET", "https://example.invalid/")
+        self.assertEqual(cm.exception.retry_after, 120)
+
+    def test_rate_limit_without_usable_retry_after(self):
+        client = _client(
+            _response(
+                status=429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+            )
+        )
+        with self.assertRaises(RateLimitError) as cm:
+            client._request("GET", "https://example.invalid/")
+        self.assertIsNone(cm.exception.retry_after)
+
+    def test_non_2xx_is_malformed(self):
+        client = _client(_response(status=500, body="oops"))
+        with self.assertRaises(MalformedResponse) as cm:
+            client._request_json("GET", "https://example.invalid/", parse_meter_usage)
+        self.assertEqual(cm.exception.status_code, 500)
+        self.assertEqual(cm.exception.body, "oops")
+
+    def test_html_body_is_malformed(self):
+        # An unauthenticated AJAX call answers 403 with an HTML page.
+        client = _client(
+            _response(
+                status=403, body="<html>Forbidden</html>", content_type="text/html"
+            )
+        )
+        with self.assertRaises(MalformedResponse) as cm:
+            client._request_json("GET", "https://example.invalid/", parse_meter_usage)
+        self.assertEqual(cm.exception.content_type, "text/html")
+
+    def test_non_json_body_is_malformed(self):
+        client = _client(_response(body="not json at all"))
+        with self.assertRaises(MalformedResponse) as cm:
+            client._request_json("GET", "https://example.invalid/", parse_meter_usage)
+        self.assertIn("not JSON", str(cm.exception))
+
+    def test_missing_field_is_malformed(self):
+        client = _client(_response(body='{"Lines": []}'))
+        with self.assertRaises(MalformedResponse) as cm:
+            client._request_json("GET", "https://example.invalid/", parse_meter_usage)
+        self.assertIn("unexpected response body", str(cm.exception))
+
+    def test_body_snippet_is_truncated(self):
+        client = _client(_response(status=500, body="x" * 500))
+        with self.assertRaises(MalformedResponse) as cm:
+            client._request("GET", "https://example.invalid/")
+        self.assertEqual(len(cm.exception.body), MalformedResponse.BODY_SNIPPET_LEN)
 
 
 class TestDeserializeMetersResponse(unittest.TestCase):
