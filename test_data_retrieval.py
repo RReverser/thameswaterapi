@@ -10,6 +10,7 @@ import requests
 
 from thameswaterapi import (
     END_SESSION_ENDPOINT,
+    TOKEN_ENDPOINT,
     AuthenticationError,
     HourlyMeasurement,
     Line,
@@ -42,12 +43,17 @@ def _response(
     return r
 
 
-def _client(response: requests.Response) -> ThamesWater:
-    """A client whose session returns ``response`` without authenticating."""
+def _client(*responses: requests.Response) -> ThamesWater:
+    """A client whose session replays ``responses`` without authenticating."""
     client = ThamesWater.__new__(ThamesWater)
     client.s = mock.Mock(spec=requests.Session)
-    client.s.request.return_value = response
+    if len(responses) == 1:
+        client.s.request.return_value = responses[0]
+    else:
+        client.s.request.side_effect = responses
     client.timeout = 30.0
+    client.client_id = "test-client-id"
+    client._refresh_token = None
     return client
 
 
@@ -330,6 +336,47 @@ class TestLogout(unittest.TestCase):
         )
         client.logout()
         self.assertEqual(client.s.request.call_args.args, ("GET", END_SESSION_ENDPOINT))
+
+
+class TestRefreshTokenGrant(unittest.TestCase):
+    def _client_with_token(self, *responses):
+        client = _client(*responses)
+        client._refresh_token = "old-token"
+        return client
+
+    def test_posts_the_grant_to_the_token_endpoint(self):
+        client = self._client_with_token(
+            _response(body='{"id_token": "i", "refresh_token": "new-token"}')
+        )
+        client._refresh_token_grant()
+        method, url = client.s.request.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, TOKEN_ENDPOINT)
+        data = client.s.request.call_args.kwargs["data"]
+        self.assertEqual(data["grant_type"], "refresh_token")
+        self.assertEqual(data["refresh_token"], "old-token")
+
+    def test_rotated_token_is_stored(self):
+        client = self._client_with_token(
+            _response(body='{"id_token": "i", "refresh_token": "new-token"}')
+        )
+        client._refresh_token_grant()
+        self.assertEqual(client.refresh_token, "new-token")
+
+    def test_rejected_token_is_malformed_not_an_auth_failure(self):
+        # A spent or expired refresh token is a fall-through signal for the
+        # authentication ladder, never a statement about the password.
+        client = self._client_with_token(
+            _response(status=400, body='{"error": "invalid_grant"}')
+        )
+        with self.assertRaises(MalformedResponse):
+            client._refresh_token_grant()
+
+    def test_without_a_token(self):
+        client = _client(_response())
+        client._refresh_token = None
+        with self.assertRaises(ValueError):
+            client._refresh_token_grant()
 
 
 class TestSelfAssertedStep(unittest.TestCase):
