@@ -327,6 +327,25 @@ class TestRefreshTokenGrant(unittest.TestCase):
         self.assertEqual(data["grant_type"], "refresh_token")
         self.assertEqual(data["refresh_token"], "old-token")
 
+    def test_carries_no_browser_telemetry(self):
+        client = self._client_with_token(
+            _response(body='{"id_token": "i", "refresh_token": "new-token"}')
+        )
+        client._refresh_token_grant()
+
+        data = client.s.request.call_args.kwargs["data"]
+        assert not [key for key in data if key.startswith(("x-client", "x-ms"))]
+        assert "client_info" not in data
+
+    def test_declares_that_it_understands_a_rate_limit(self):
+        client = self._client_with_token(
+            _response(body='{"id_token": "i", "refresh_token": "new-token"}')
+        )
+        client._refresh_token_grant()
+
+        headers = client.s.request.call_args.kwargs["headers"]
+        assert headers["x-ms-lib-capability"] == "retry-after, h429"
+
     def test_rotated_token_is_stored(self):
         client = self._client_with_token(
             _response(body='{"id_token": "i", "refresh_token": "new-token"}')

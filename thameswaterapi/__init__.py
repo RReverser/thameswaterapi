@@ -58,6 +58,13 @@ class MalformedResponse(Exception):
 #: requests has no default timeout of its own, so every call sets one.
 DEFAULT_TIMEOUT = 30.0
 
+# Sent on token requests to say the client understands a 429 answer and the
+# Retry-After that comes with it, which is what RateLimitError reports.
+TOKEN_REQUEST_HEADERS = {
+    "content-type": "application/x-www-form-urlencoded;charset=utf-8",
+    "x-ms-lib-capability": "retry-after, h429",
+}
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
@@ -314,8 +321,8 @@ def parse_meter_usage(data: dict) -> MeterUsage:
 def parse_token_response(data: dict) -> TokenResponse:
     """Parse a token endpoint response.
 
-    The endpoint returns a dozen MSAL telemetry and client_info fields that
-    nothing here reads, so the wanted ones are picked out rather than filtered.
+    The endpoint returns several fields nothing here reads, so the wanted
+    ones are picked out rather than filtered.
     """
     if "error" in data:
         raise ValueError(
@@ -724,27 +731,21 @@ class ThamesWater:
     def _get_oauth2_code_b2c_1_tw_website_signin(
         self, confirmation_code: str
     ) -> TokenResponse:
-        url = TOKEN_ENDPOINT
-
-        headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
-
         data = {
             "client_id": self.client_id,
             "redirect_uri": "https://www.thameswater.co.uk/login",
             "scope": "openid offline_access profile",
             "grant_type": "authorization_code",
-            "client_info": "1",
-            "x-client-SKU": "msal.js.browser",
-            "x-client-VER": "3.1.0",
-            "x-ms-lib-capability": "retry-after, h429",
-            "x-client-current-telemetry": "5|865,0,,,|,",
-            "x-client-last-telemetry": "5|0|||0,0",
             "code_verifier": self.pkce_verifier,
             "code": confirmation_code,
         }
 
         tokens = self._request_json(
-            "POST", url, _parse_id_token_response, headers=headers, data=data
+            "POST",
+            TOKEN_ENDPOINT,
+            _parse_id_token_response,
+            headers=TOKEN_REQUEST_HEADERS,
+            data=data,
         )
         self._store_tokens(tokens)
         return tokens
@@ -767,19 +768,11 @@ class ThamesWater:
             "client_id": self.client_id,
             "scope": scope,
             "grant_type": "refresh_token",
-            "client_info": "1",
-            "x-client-SKU": "msal.js.browser",
-            "x-client-VER": "3.1.0",
-            "x-ms-lib-capability": "retry-after, h429",
-            "x-client-current-telemetry": "5|61,0,,,|@azure/msal-react,2.0.3",
-            "x-client-last-telemetry": "5|0|||0,0",
             "refresh_token": self._refresh_token,
         }
 
-        headers = {"content-type": "application/x-www-form-urlencoded;charset=utf-8"}
-
         tokens = self._request_json(
-            "POST", TOKEN_ENDPOINT, parse, headers=headers, data=data
+            "POST", TOKEN_ENDPOINT, parse, headers=TOKEN_REQUEST_HEADERS, data=data
         )
         self._store_tokens(tokens)
         return tokens
