@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import datetime
+import enum
 import hashlib
 import json
 import logging
@@ -100,6 +102,23 @@ class PrimaryAccountHolder:
     fullName: str | None
 
 
+class MeterType(enum.IntEnum):
+    """How a property is metered, as the website's own code names them.
+
+    Only a SMART_METERED property serves hourly readings; asking
+    :meth:`ThamesWater.get_meter_usage` about any other kind answers with
+    ``IsDataAvailable=False`` and no lines.
+
+    An IntEnum, so a comparison against the raw integer the API sends works
+    without converting anything, and a value not listed here does not raise.
+    """
+
+    UNKNOWN = 0
+    DUMB_METERED = 1
+    SMART_METERED = 2
+    UNMETERED = 3
+
+
 @dataclass
 class Property:
     propertyId: str | None
@@ -145,6 +164,15 @@ class Account:
     isCollective: bool | None = None
     correspondence: Correspondence | None = None
     isMovedOutStillActive: bool | None = None
+
+    # builtins.property, because the field above shadows the name here.
+    @builtins.property
+    def is_smart_metered(self) -> bool:
+        """Whether this account's property can serve hourly readings."""
+        return (
+            self.property is not None
+            and self.property.meterType == MeterType.SMART_METERED
+        )
 
 
 @dataclass
