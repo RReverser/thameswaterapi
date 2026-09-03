@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import csv
 import datetime
 import enum
 import hashlib
@@ -11,7 +12,9 @@ import os
 import re
 import uuid
 import zoneinfo
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from importlib import resources
 from typing import Literal
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -32,6 +35,9 @@ TARIFF_URL = (
     "https://www.thameswater.co.uk/help/account-and-billing/"
     "understand-your-bill/metered-customers"
 )
+
+#: Published rates per charging year, shipped beside this module.
+TARIFF_CSV = "tariffs.csv"
 
 
 @dataclass
@@ -189,9 +195,10 @@ class Tariff:
     wastewater_rate_per_m3: float
     water_fixed_per_year: float
     wastewater_fixed_per_year: float
-    #: The date these figures took effect, so a caller can price a historical
-    #: reading at the rate in force on its own date.
-    effective_date: datetime.date
+    #: The year the charging year starts in, so a caller can price a
+    #: historical reading at the rate in force on its own date.
+    #: :attr:`effective_date` and :attr:`expires` derive the dates from it.
+    charging_year: int
 
     @property
     def volumetric_rate_per_m3(self) -> float:
@@ -209,6 +216,87 @@ class Tariff:
         return round(
             (self.water_fixed_per_year + self.wastewater_fixed_per_year) / 365, 4
         )
+
+    @property
+    def effective_date(self) -> datetime.date:
+        """The 1 April on which these charges took effect."""
+        return datetime.date(self.charging_year, 4, 1)
+
+    @property
+    def expires(self) -> datetime.date:
+        """The 1 April on which these charges stop applying."""
+        return datetime.date(self.charging_year + 1, 4, 1)
+
+
+#: The charging years Thames Water has published, oldest first.
+#:
+#: The rates live in ``tariffs.csv`` beside this module, transcribed from the
+#: charges schemes published as PDFs, which carry no machine-readable figures.
+#: Holding them prices a historical reading at the rate that was in force for
+#: it, rather than at whatever the current help page happens to say.
+TARIFFS: dict[int, Tariff] = {
+    tariff.charging_year: tariff
+    for tariff in (
+        Tariff(
+            clean_water_rate_per_m3=float(row["clean_water_rate_per_m3"]),
+            wastewater_rate_per_m3=float(row["wastewater_rate_per_m3"]),
+            water_fixed_per_year=float(row["water_fixed_per_year"]),
+            wastewater_fixed_per_year=float(row["wastewater_fixed_per_year"]),
+            charging_year=int(row["charging_year"]),
+        )
+        for row in csv.DictReader(
+            resources.files(__package__).joinpath(TARIFF_CSV).read_text().splitlines()
+        )
+    )
+}
+
+
+def charging_year(day: datetime.date) -> int:
+    """The year the charging year containing ``day`` started in.
+
+    Charges run from 1 April to 31 March, so a day before 1 April belongs
+    to the year before it.
+    """
+    return day.year if day >= datetime.date(day.year, 4, 1) else day.year - 1
+
+
+def tariff_for(
+    day: datetime.date,
+    session: requests.Session | None = None,
+    tariffs: Mapping[int, Tariff] = TARIFFS,
+) -> Tariff:
+    """Return the published charges that were in force on ``day``.
+
+    A charging year on record is answered from the table, without a
+    request. A later one falls back to the help page, which carries the
+    current year. A year neither has raises :class:`TariffError`.
+    """
+    year = charging_year(day)
+    if (tariff := tariffs.get(year)) is not None:
+        return tariff
+
+    # Only a year past the table can be on the page; an earlier one is
+    # simply not published anywhere, so asking would waste a request.
+    if tariffs and year > max(tariffs):
+        scraped = _current_tariff(year, session)
+        if scraped.charging_year == year:
+            return scraped
+
+    raise TariffError(f"No published charges for the year beginning 1 April {year}")
+
+
+#: The last scrape. It serves every day of its own charging year, so the page
+#: is read once a year rather than once a run.
+_scraped: Tariff | None = None
+
+
+def _current_tariff(year: int, session: requests.Session | None = None) -> Tariff:
+    """Return the scraped charges, reading the page only once they expire."""
+    global _scraped
+
+    if _scraped is None or _scraped.charging_year != year:
+        _scraped = get_tariff(session)
+    return _scraped
 
 
 @dataclass
@@ -302,15 +390,26 @@ def _search_tariff_float(pattern: str, text: str, description: str) -> float:
     return float(match.group(1))
 
 
-def _search_tariff_date(pattern: str, text: str, description: str) -> datetime.date:
-    """Return the first captured group of ``pattern`` in ``text`` as a date."""
+def _search_charging_year(pattern: str, text: str, description: str) -> int:
+    """Return the year of the 1 April date ``pattern`` captures in ``text``.
+
+    A charging year runs from 1 April to 31 March, and :class:`Tariff` keeps
+    the year alone. A page naming any other date has to fail here rather than
+    lose the day it named.
+    """
     match = re.search(pattern, text)
     if match is None:
         raise TariffError(
             f"Could not find {description} on the Thames Water tariff page "
             "(the page markup may have changed)"
         )
-    return datetime.datetime.strptime(match.group(1), "%d %B %Y").date()  # noqa: DTZ007
+    date = datetime.datetime.strptime(match.group(1), "%d %B %Y").date()  # noqa: DTZ007
+    if (date.month, date.day) != (4, 1):
+        raise TariffError(
+            f"The Thames Water tariff page gives {date} as {description}, "
+            "which is not the 1 April a charging year starts on"
+        )
+    return date.year
 
 
 def parse_tariff(html: str) -> Tariff:
@@ -348,7 +447,7 @@ def parse_tariff(html: str) -> Tariff:
         ),
         # The same sentence as the volumetric rates: "...£1.4721 per m3 for
         # wastewater as of 1 April 2026."
-        effective_date=_search_tariff_date(
+        charging_year=_search_charging_year(
             r"for wastewater as of ([0-9]{1,2} [A-Za-z]+ [0-9]{4})",
             text,
             "the date the rates took effect",

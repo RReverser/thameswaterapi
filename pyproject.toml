@@ -32,6 +32,12 @@ dev = [
     "mypy>=1.7.0",
 ]
 
+[tool.setuptools.package-data]
+# The tariff table is data beside the module, which setuptools leaves out of
+# the wheel unless it is named here. A source checkout imports it either way,
+# so an omission only shows up once installed.
+thameswaterapi = ["*.csv"]
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"

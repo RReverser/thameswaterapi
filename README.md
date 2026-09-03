@@ -89,6 +89,38 @@ tariff.standing_charge_per_day  # combined fixed charge GBP/day
 `ThamesWater.get_tariff()` is also available on an authenticated client (it
 reuses the session).
 
+Readings arrive days in arrears and charges change on 1 April, so pricing one
+needs the rates that were in force on its own date rather than whatever the
+page says today. Those are held in `TARIFFS`, read from `tariffs.csv` beside
+the module and transcribed from the charges schemes Thames Water publishes as
+PDFs:
+
+```python
+from thameswaterapi import tariff_for
+
+tariff_for(datetime.date(2024, 6, 1)).clean_water_rate_per_m3  # 1.9145
+tariff_for(datetime.date(2025, 6, 1)).clean_water_rate_per_m3  # 2.4743
+```
+
+A charging year runs from 1 April to 31 March, so a day picks its year by
+`charging_year` and `TARIFFS` is keyed by it. `effective_date` and `expires`
+give the dates that year spans:
+
+```python
+from thameswaterapi import TARIFFS, charging_year
+
+charging_year(datetime.date(2026, 3, 31))  # 2025
+TARIFFS[2026].effective_date  # datetime.date(2026, 4, 1)
+TARIFFS[2026].expires  # datetime.date(2027, 4, 1)
+```
+
+No request is made for a day the table covers. A day past it falls back to the
+help page, and that scrape then serves the rest of its own charging year, so
+the library keeps working across a changeover it has not been told about yet
+without reading the page again. A day neither covers raises `TariffError`. A
+scheduled workflow watches the page and opens a pull request adding the year
+when it turns over.
+
 ## Command line
 
 ```
