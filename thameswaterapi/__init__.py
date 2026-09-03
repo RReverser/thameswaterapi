@@ -79,6 +79,23 @@ TOKEN_ENDPOINT = f"{B2C_USER_FLOW_URL}/token"
 END_SESSION_ENDPOINT = f"{B2C_USER_FLOW_URL}/logout"
 
 
+MYACCOUNT_URL = "https://myaccount.thameswater.co.uk"
+LOGIN_URL = f"{MYACCOUNT_URL}/login"
+#: Visiting this scopes the session to a contract account, and the AJAX
+#: endpoints below name it as their Referer.
+METER_PAGE_URL = f"{MYACCOUNT_URL}/mydashboard/my-meters-usage"
+GET_METERS_URL = f"{MYACCOUNT_URL}/ajax/waterMeter/getMeters"
+METER_USAGE_URL = f"{MYACCOUNT_URL}/ajax/waterMeter/getSmartWaterMeterConsumptions"
+
+#: What the site's own JavaScript sends on those endpoints.
+AJAX_HEADERS = {
+    "Referer": METER_PAGE_URL,
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+FORM_HEADERS = {"content-type": "application/x-www-form-urlencoded"}
+
+
 # Public help page carrying the current metered-household Scheme of Charges.
 # The figures are region-wide (identical for every customer) and need no auth.
 TARIFF_URL = (
@@ -824,16 +841,12 @@ class ThamesWater:
         return tokens
 
     def _login(self, state: str, id_token: str):
-        url = "https://myaccount.thameswater.co.uk/login"
-
         data = {
             "state": state,
             "id_token": id_token,
         }
 
-        headers = {"content-type": "application/x-www-form-urlencoded"}
-
-        self._request("POST", url, data=data, headers=headers)
+        self._request("POST", LOGIN_URL, data=data, headers=FORM_HEADERS)
 
     def authenticate(self) -> None:
         """Establish a session, trying each credential in turn.
@@ -946,9 +959,9 @@ class ThamesWater:
         # fresh id_token in its body, so this one does follow its redirects.
         r = self._request(
             "POST",
-            "https://myaccount.thameswater.co.uk/login",
+            LOGIN_URL,
             data={"id_token": id_token, "state": ""},
-            headers={"content-type": "application/x-www-form-urlencoded"},
+            headers=FORM_HEADERS,
         )
 
         query_params = parse_qs(urlparse(r.url).query)
@@ -975,7 +988,7 @@ class ThamesWater:
         """
         self._request(
             "GET",
-            "https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage",
+            METER_PAGE_URL,
             params={"contractAccountNumber": self._account_number},
         )
         self._meter_page_visited = True
@@ -1001,14 +1014,9 @@ class ThamesWater:
         """
         self._ensure_session()
 
-        url = "https://myaccount.thameswater.co.uk/ajax/waterMeter/getMeters"
-
-        headers = {
-            "Referer": "https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        return self._request_json("GET", url, parse_meters_response, headers=headers)
+        return self._request_json(
+            "GET", GET_METERS_URL, parse_meters_response, headers=AJAX_HEADERS
+        )
 
     def get_meter_usage(
         self,
@@ -1018,8 +1026,6 @@ class ThamesWater:
         granularity: Literal["H", "D", "M"] = "H",
     ) -> MeterUsage:
         self._ensure_session()
-
-        url = "https://myaccount.thameswater.co.uk/ajax/waterMeter/getSmartWaterMeterConsumptions"
 
         params = {
             "meter": meter,
@@ -1034,13 +1040,12 @@ class ThamesWater:
             "isForC4C": "false",
         }
 
-        headers = {
-            "Referer": "https://myaccount.thameswater.co.uk/mydashboard/my-meters-usage",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
         return self._request_json(
-            "GET", url, parse_meter_usage, params=params, headers=headers
+            "GET",
+            METER_USAGE_URL,
+            parse_meter_usage,
+            params=params,
+            headers=AJAX_HEADERS,
         )
 
     def _acquire_account_management_api_access_token(self) -> str:
