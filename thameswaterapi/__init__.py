@@ -343,9 +343,9 @@ def parse_meters_response(data: dict) -> MetersResponse:
 def _decode_jwt_payload(token: str) -> dict:
     """Decode the payload of a JWT without verifying the signature."""
     payload = token.split(".")[1]
-    # Add padding for base64
-    payload += "=" * (4 - len(payload) % 4)
-    return json.loads(base64.b64decode(payload))
+    # JWT payloads are base64url and carry no padding; b64decode wants it back.
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
 
 
 class ThamesWater:
