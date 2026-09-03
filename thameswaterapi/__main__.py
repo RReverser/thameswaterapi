@@ -94,13 +94,12 @@ def main() -> None:
         print(f"  {daily.start}  usage={daily.usage}L  total={daily.total}L")
     print()
 
-    end = datetime.datetime.now(
+    day = datetime.datetime.now(
         tz=zoneinfo.ZoneInfo("Europe/London")
-    ) - datetime.timedelta(days=1)
-    start = end - datetime.timedelta(days=1)
-    usage = tw.get_meter_usage(meter, start, end)
-    print(f"Hourly readings ({start.date()}):")
-    for hourly in meter_usage_lines_to_timeseries(start, usage.Lines):
+    ).date() - datetime.timedelta(days=1)
+    usage = tw.get_meter_usage(meter, day, day)
+    print(f"Hourly readings ({day}):")
+    for hourly in meter_usage_lines_to_timeseries(day, usage.Lines):
         print(f"  {hourly.hour_start}  usage={hourly.usage}L  total={hourly.total}L")
 
 

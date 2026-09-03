@@ -194,6 +194,9 @@ class HourlyMeasurement:
     total: int  # Read
 
 
+#: Meter readings are labelled in local clock time.
+LONDON = zoneinfo.ZoneInfo("Europe/London")
+
 _logger = logging.getLogger(__name__)
 
 # Audience (resource app id) for the account-management-api. The app id is
@@ -612,8 +615,8 @@ class ThamesWater:
     def get_meter_usage(
         self,
         meter: int | str,
-        start: datetime.datetime,
-        end: datetime.datetime,
+        start: datetime.date,
+        end: datetime.date,
         granularity: Literal["H", "D", "M"] = "H",
     ) -> MeterUsage:
         url = "https://myaccount.thameswater.co.uk/ajax/waterMeter/getSmartWaterMeterConsumptions"
@@ -741,53 +744,55 @@ def lines_to_timeseries(lines: list[Line]) -> list[Measurement]:
     ]
 
 
-def _date_range(
-    start: datetime.date,
-    end: datetime.date,
-    freq: datetime.timedelta = datetime.timedelta(hours=1),
-    tz: str = "Europe/London",
-) -> list[datetime.datetime]:
-    # Naive datetimes are promoted here and localized just below.
-    if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
-        start = datetime.datetime(start.year, start.month, start.day)  # noqa: DTZ001
-    if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
-        end = datetime.datetime(end.year, end.month, end.day)  # noqa: DTZ001
-    if start.tzinfo is not None or end.tzinfo is not None:
-        raise ValueError(
-            "Input datetimes must be timezone-naive. Convert them to naive before calling this function."
-        )
-
-    tzinfo = zoneinfo.ZoneInfo(tz)
-    start = start.replace(tzinfo=tzinfo)
-    end = end.replace(tzinfo=tzinfo)
-
-    result = []
-    current = start
-    while current <= end:
-        result.append(current)
-        current += freq
-
-    return result
+def _parse_line_label_as_hour(label: str) -> datetime.time:
+    """Parse an hourly line label like '0:00' or '23:00' into a clock time."""
+    return datetime.datetime.strptime(label.strip(), "%H:%M").time()  # noqa: DTZ007
 
 
 def meter_usage_lines_to_timeseries(
     start: datetime.date,
     lines: list[Line],
 ) -> list[HourlyMeasurement]:
-    """Convert hourly meter usage lines to a time series of HourlyMeasurement objects.
+    """Convert hourly meter usage lines to a time series.
 
-    Assumptions:
-    * Lines is hourly
-    * Lines is contiguous (no gaps)
+    An hourly label is a clock time that repeats every day, so it carries the
+    hour but not the day. The day comes from a cursor that starts at ``start``
+    and advances every time a label reads 0:00, which is where one day ends
+    and the next begins.
+
+    Counting day boundaries this way is indifferent to how many rows a day
+    has, so one rule covers every case the API produces: a window of any
+    width, a spring 23-hour day, a day with hours missing from the middle,
+    and a response truncated before the window ends. Deriving the day from
+    the row's position instead would need all of those to be exactly 24 rows,
+    and a window spanning a DST transition is not.
+
+    An autumn 25-hour day repeats a label, because 1:00 happens twice. The
+    second one is the repeat, which is what ``fold=1`` denotes, so the two
+    rows land an hour apart as they should. On any other day the same
+    ``fold`` is a no-op, so a label repeated for any other reason is left
+    where it was.
     """
-    if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
-        start = datetime.datetime(start.year, start.month, start.day)  # noqa: DTZ001
-    timestamps = _date_range(start, start + datetime.timedelta(hours=len(lines)))
-    return [
-        HourlyMeasurement(
-            hour_start=timestamps[i],
-            usage=int(line.Usage),
-            total=int(line.Read),
+    day = start.date() if isinstance(start, datetime.datetime) else start
+    seen: set[datetime.time] = set()
+
+    measurements = []
+    for index, line in enumerate(lines):
+        hour = _parse_line_label_as_hour(line.Label)
+        if index > 0 and hour == datetime.time.min:
+            day += datetime.timedelta(days=1)
+            seen.clear()
+
+        hour_start = datetime.datetime.combine(day, hour, tzinfo=LONDON)
+        if hour in seen:
+            hour_start = hour_start.replace(fold=1)
+        seen.add(hour)
+
+        measurements.append(
+            HourlyMeasurement(
+                hour_start=hour_start,
+                usage=int(line.Usage),
+                total=int(line.Read),
+            )
         )
-        for i, line in enumerate(lines)
-    ]
+    return measurements
