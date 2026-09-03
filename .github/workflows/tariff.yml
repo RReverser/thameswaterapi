@@ -1,0 +1,38 @@
+name: Tariff
+
+on:
+  schedule:
+    # Charges change on 1 April, and the page names the new ones two months
+    # ahead: it carried the 2025-26 rates by 6 February 2025 and the 2026-27
+    # rates by 11 February 2026, each within a fortnight of the charges
+    # scheme itself. February finds the change; April covers a year that
+    # slips. Nothing moves the page in between.
+    #
+    # GitHub drops scheduled runs under load. Two runs a week mean a
+    # dropped one costs a few days, not a fortnight.
+    - cron: "17 6 * 2-4 1,4"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install .
+      - run: python scripts/check_tariff.py
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: tariff-update
+          title: Add the new charging year to the tariff table
+          commit-message: Add the new charging year to the tariff table
+          body: >
+            The metered-customers help page now names a later effective date
+            than the newest entry in `TARIFFS`. Check the figures against the
+            charges scheme PDF before merging — the page carries only the
+            volumetric rates and the household fixed charges.
