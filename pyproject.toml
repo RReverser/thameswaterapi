@@ -13,6 +13,9 @@ readme = "README.md"
 requires-python = ">=3.9,<4.0"
 dependencies = [
     "requests>=2.31.0",
+    # Windows ships no zone database, and readings are timestamped in
+    # Europe/London.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -23,11 +26,17 @@ lint = [
 [project.urls]
 Homepage = "https://github.com/jelmer/thameswaterapi"
 
-[tool.poetry.dev-dependencies]
-pytest = "^7.4.0"
-mypy = "^1.7.0"
-python-dotenv = "^1.0.1"
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "mypy>=1.7.0",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The repository root also holds test modules, which are not part of the
+# distribution, so the package is named rather than discovered.
+packages = ["thameswaterapi"]
