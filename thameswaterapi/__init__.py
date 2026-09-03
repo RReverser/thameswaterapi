@@ -1,14 +1,17 @@
-import os
-import uuid
+from __future__ import annotations
+
 import base64
-import hashlib
 import datetime
+import hashlib
 import json
-import re
-from typing import Optional, Literal
 import logging
+import os
+import re
+import uuid
+import zoneinfo
 from dataclasses import dataclass, field, fields
-from urllib.parse import urlparse, parse_qs, unquote
+from typing import Literal
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
@@ -52,14 +55,14 @@ class MeterUsage:
     TargetUsage: float
     AverageUsage: float
     ActualUsage: float
-    MyUsage: Optional[str]  # so far have only seen 'NA', 'High', or None
+    MyUsage: str | None  # so far have only seen 'NA', 'High', or None
     AverageUsagePerPerson: float
     IsMO365Customer: bool
     IsMOPartialCustomer: bool
     IsMOCompleteCustomer: bool
     IsExtraMonthConsumptionMessage: bool
     Lines: list[Line] = field(default_factory=list)
-    AlertsValues: Optional[dict] = field(default_factory=dict)
+    AlertsValues: dict | None = field(default_factory=dict)
 
 
 @dataclass
@@ -78,44 +81,44 @@ class MetersResponse(MeterUsage):
 
 @dataclass
 class Address:
-    addressLine1: Optional[str]
-    addressLine2: Optional[str]
-    town: Optional[str]
-    administrativeArea: Optional[str]
-    country: Optional[str]
-    postcode: Optional[str]
-    fullAddress: Optional[str]
+    addressLine1: str | None
+    addressLine2: str | None
+    town: str | None
+    administrativeArea: str | None
+    country: str | None
+    postcode: str | None
+    fullAddress: str | None
 
 
 @dataclass
 class PrimaryAccountHolder:
-    businessPartnerId: Optional[str]
-    dateOfBirth: Optional[str]
-    firstName: Optional[str]
-    secondName: Optional[str]
-    lastName: Optional[str]
-    fullName: Optional[str]
+    businessPartnerId: str | None
+    dateOfBirth: str | None
+    firstName: str | None
+    secondName: str | None
+    lastName: str | None
+    fullName: str | None
 
 
 @dataclass
 class Property:
-    propertyId: Optional[str]
-    address: Optional[Address]
-    meterType: Optional[int]
+    propertyId: str | None
+    address: Address | None
+    meterType: int | None
 
 
 @dataclass
 class ContactDetails:
-    primaryLandlineNumber: Optional[str]
-    primaryMobileNumber: Optional[str]
-    primaryEmail: Optional[str]
-    isPrimaryLandlineNumberValid: Optional[bool]
-    isPrimaryMobileNumberValid: Optional[bool]
+    primaryLandlineNumber: str | None
+    primaryMobileNumber: str | None
+    primaryEmail: str | None
+    isPrimaryLandlineNumberValid: bool | None
+    isPrimaryMobileNumberValid: bool | None
 
 
 @dataclass
 class Correspondence:
-    address: Optional[Address]
+    address: Address | None
 
 
 @dataclass
@@ -123,25 +126,25 @@ class Account:
     """Account details from the account-management-api /Accounts endpoint."""
 
     contractAccountNumber: str
-    billingPreference: Optional[int] = None
-    moveInDate: Optional[str] = None
+    billingPreference: int | None = None
+    moveInDate: str | None = None
     paymentDueAmount: float = 0.0
     currentBalance: float = 0.0
-    moveOutDate: Optional[str] = None
-    primaryAccountHolder: Optional[PrimaryAccountHolder] = None
-    property: Optional[Property] = None
-    isProgressiveMeterProgram: Optional[bool] = None
-    status: Optional[int] = None
-    isMetered: Optional[bool] = None
-    isFutureMoveIn: Optional[bool] = None
-    isActiveAccount: Optional[bool] = None
-    isInCredit: Optional[bool] = None
-    dunningLock: Optional[bool] = None
-    contactDetails: Optional[ContactDetails] = None
-    isStandard: Optional[bool] = None
-    isCollective: Optional[bool] = None
-    correspondence: Optional[Correspondence] = None
-    isMovedOutStillActive: Optional[bool] = None
+    moveOutDate: str | None = None
+    primaryAccountHolder: PrimaryAccountHolder | None = None
+    property: Property | None = None
+    isProgressiveMeterProgram: bool | None = None
+    status: int | None = None
+    isMetered: bool | None = None
+    isFutureMoveIn: bool | None = None
+    isActiveAccount: bool | None = None
+    isInCredit: bool | None = None
+    dunningLock: bool | None = None
+    contactDetails: ContactDetails | None = None
+    isStandard: bool | None = None
+    isCollective: bool | None = None
+    correspondence: Correspondence | None = None
+    isMovedOutStillActive: bool | None = None
 
 
 @dataclass
@@ -219,7 +222,7 @@ def parse_meter_usage(data: dict) -> MeterUsage:
     return MeterUsage(**_filter_known_fields(MeterUsage, data))
 
 
-def _parse_address(data: Optional[dict]) -> Optional[Address]:
+def _parse_address(data: dict | None) -> Address | None:
     if data is None:
         return None
     return Address(**_filter_known_fields(Address, data))
@@ -301,7 +304,7 @@ def parse_tariff(html: str) -> Tariff:
     )
 
 
-def get_tariff(session: Optional[requests.Session] = None) -> Tariff:
+def get_tariff(session: requests.Session | None = None) -> Tariff:
     """Fetch and parse the current metered-household tariff.
 
     Needs no authentication (the figures are region-wide), so it can be called
@@ -350,7 +353,7 @@ class ThamesWater:
         self,
         email: str,
         password: str,
-        account_number: Optional[int] = None,
+        account_number: int | None = None,
         client_id: str = "cedfde2d-79a7-44fd-9833-cae769640d3d",  # specific to Thames Water
     ):
         self.s = requests.session()
@@ -713,7 +716,7 @@ def _parse_line_label_as_date(label: str, today: datetime.date) -> datetime.date
     e.g. a December label in a response fetched in January uses the prior year.
     """
     # Append the current year to avoid the Python 3.15 deprecation for yearless strptime.
-    dt = datetime.datetime.strptime(f"{label}-{today.year}", "%d-%B-%Y")
+    dt = datetime.datetime.strptime(f"{label}-{today.year}", "%d-%B-%Y")  # noqa: DTZ007
     # If the label month is later than June and we're in the first half of the year,
     # the data belongs to the previous year.
     if dt.month > 6 and today.month <= 6:
@@ -727,7 +730,7 @@ def lines_to_timeseries(lines: list[Line]) -> list[Measurement]:
     The date of each measurement is parsed from the line's Label field
     (e.g. '16-January', '1-February').
     """
-    today = datetime.date.today()
+    today = datetime.datetime.now(tz=zoneinfo.ZoneInfo("Europe/London")).date()
     return [
         Measurement(
             start=_parse_line_label_as_date(line.Label, today),
@@ -744,12 +747,11 @@ def _date_range(
     freq: datetime.timedelta = datetime.timedelta(hours=1),
     tz: str = "Europe/London",
 ) -> list[datetime.datetime]:
-    import zoneinfo
-
+    # Naive datetimes are promoted here and localized just below.
     if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
-        start = datetime.datetime(start.year, start.month, start.day)
+        start = datetime.datetime(start.year, start.month, start.day)  # noqa: DTZ001
     if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
-        end = datetime.datetime(end.year, end.month, end.day)
+        end = datetime.datetime(end.year, end.month, end.day)  # noqa: DTZ001
     if start.tzinfo is not None or end.tzinfo is not None:
         raise ValueError(
             "Input datetimes must be timezone-naive. Convert them to naive before calling this function."
@@ -779,7 +781,7 @@ def meter_usage_lines_to_timeseries(
     * Lines is contiguous (no gaps)
     """
     if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
-        start = datetime.datetime(start.year, start.month, start.day)
+        start = datetime.datetime(start.year, start.month, start.day)  # noqa: DTZ001
     timestamps = _date_range(start, start + datetime.timedelta(hours=len(lines)))
     return [
         HourlyMeasurement(
