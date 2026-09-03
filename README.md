@@ -12,8 +12,8 @@ by [Ayrton Bourn](https://github.com/AyrtonB).
 ```python
 from thameswaterapi import ThamesWater
 
-email = 'myname@provider.com'
-password = '**********'
+email = "myname@provider.com"
+password = "**********"
 
 thames_water = ThamesWater(email=email, password=password)
 ```
@@ -28,7 +28,7 @@ thames_water = ThamesWater(email=email, password=password, account_number=123456
 
 ```python
 thames_water.get_account_numbers()  # [123456789011, 123456789012]
-thames_water.get_meter_numbers()    # ['123456789']
+thames_water.get_meter_numbers()  # ['123456789']
 ```
 
 ### Daily usage
@@ -69,14 +69,14 @@ authentication:
 from thameswaterapi import get_tariff
 
 tariff = get_tariff()
-tariff.clean_water_rate_per_m3      # 2.7346
-tariff.wastewater_rate_per_m3       # 1.4721
-tariff.water_fixed_per_year         # 66.87
-tariff.wastewater_fixed_per_year    # 128.13  (standard rate, not the rebate)
+tariff.clean_water_rate_per_m3  # 2.7346
+tariff.wastewater_rate_per_m3  # 1.4721
+tariff.water_fixed_per_year  # 66.87
+tariff.wastewater_fixed_per_year  # 128.13  (standard rate, not the rebate)
 
-tariff.volumetric_rate_per_m3       # combined GBP/m3
-tariff.unit_rate_per_litre          # combined GBP/L
-tariff.standing_charge_per_day      # combined fixed charge GBP/day
+tariff.volumetric_rate_per_m3  # combined GBP/m3
+tariff.unit_rate_per_litre  # combined GBP/L
+tariff.standing_charge_per_day  # combined fixed charge GBP/day
 ```
 
 `ThamesWater.get_tariff()` is also available on an authenticated client (it
