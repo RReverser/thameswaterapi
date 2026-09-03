@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import datetime
 import unittest
-
 import zoneinfo
+from typing import ClassVar
 
 from thameswaterapi import (
     HourlyMeasurement,
@@ -20,7 +22,7 @@ from thameswaterapi import (
 class TestDeserializeMetersResponse(unittest.TestCase):
     """Test that raw JSON from getMeters is correctly deserialized."""
 
-    SAMPLE_JSON = {
+    SAMPLE_JSON: ClassVar[dict] = {
         "Yearly": [],
         "HalfYearly": [],
         "Monthly": [
@@ -122,7 +124,7 @@ class TestDeserializeMetersResponse(unittest.TestCase):
 class TestDeserializeMeterUsage(unittest.TestCase):
     """Test that raw JSON from getSmartWaterMeterConsumptions is correctly deserialized."""
 
-    SAMPLE_JSON = {
+    SAMPLE_JSON: ClassVar[dict] = {
         "IsError": False,
         "IsDataAvailable": True,
         "Lines": [
@@ -257,8 +259,8 @@ class TestLinesToTimeseries(unittest.TestCase):
 class TestDateRange(unittest.TestCase):
     def test_basic_hourly(self):
         result = _date_range(
-            datetime.datetime(2026, 2, 10),
-            datetime.datetime(2026, 2, 10, 3),
+            datetime.datetime(2026, 2, 10),  # noqa: DTZ001
+            datetime.datetime(2026, 2, 10, 3),  # noqa: DTZ001
         )
         tz = zoneinfo.ZoneInfo("Europe/London")
         self.assertEqual(len(result), 4)
@@ -285,8 +287,8 @@ class TestDateRange(unittest.TestCase):
 
     def test_empty_when_end_before_start(self):
         result = _date_range(
-            datetime.datetime(2026, 2, 11),
-            datetime.datetime(2026, 2, 10),
+            datetime.datetime(2026, 2, 11),  # noqa: DTZ001
+            datetime.datetime(2026, 2, 10),  # noqa: DTZ001
         )
         self.assertEqual(result, [])
 
@@ -342,7 +344,7 @@ class TestMeterUsageLinesToTimeseries(unittest.TestCase):
 class TestParseAccount(unittest.TestCase):
     """Test parsing of the account-management-api /Accounts response."""
 
-    SAMPLE_JSON = {
+    SAMPLE_JSON: ClassVar[dict] = {
         "contractAccountNumber": "900000000000",
         "billingPreference": 2,
         "moveInDate": "2025-09-09",

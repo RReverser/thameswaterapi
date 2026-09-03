@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import datetime
+import zoneinfo
 
 from thameswaterapi import (
     ThamesWater,
@@ -93,7 +94,9 @@ def main() -> None:
         print(f"  {daily.start}  usage={daily.usage}L  total={daily.total}L")
     print()
 
-    end = datetime.datetime.now() - datetime.timedelta(days=1)
+    end = datetime.datetime.now(
+        tz=zoneinfo.ZoneInfo("Europe/London")
+    ) - datetime.timedelta(days=1)
     start = end - datetime.timedelta(days=1)
     usage = tw.get_meter_usage(meter, start, end)
     print(f"Hourly readings ({start.date()}):")

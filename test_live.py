@@ -1,21 +1,22 @@
-#!/usr/bin/env python3
 """Live integration tests for the Thames Water client.
 
 Usage:
     python -m thameswaterapi.test_live EMAIL PASSWORD ACCOUNT_NUMBER
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import sys
 import unittest
+import zoneinfo
 
 from thameswaterapi import (
     ThamesWater,
     lines_to_timeseries,
     meter_usage_lines_to_timeseries,
 )
-
 
 # Module-level credentials, set by main() before tests run.
 _email: str = ""
@@ -64,7 +65,9 @@ class TestLiveIntegration(unittest.TestCase):
         self.assertIsInstance(account.currentBalance, (int, float))
 
     def test_get_meter_usage_hourly(self):
-        end = datetime.datetime.now() - datetime.timedelta(days=3)
+        end = datetime.datetime.now(
+            tz=zoneinfo.ZoneInfo("Europe/London")
+        ) - datetime.timedelta(days=3)
         start = end - datetime.timedelta(days=1)
         usage = self.tw.get_meter_usage(self.meter, start, end)
         self.assertFalse(usage.IsError)
