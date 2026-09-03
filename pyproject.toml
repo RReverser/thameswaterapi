@@ -18,6 +18,11 @@ dependencies = [
     "tzdata; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+lint = [
+    "ruff==0.16.5",
+]
+
 [project.urls]
 Homepage = "https://github.com/jelmer/thameswaterapi"
 
