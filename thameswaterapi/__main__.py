@@ -62,6 +62,7 @@ def main() -> None:
             f"£{tariff.wastewater_fixed_per_year}/yr wastewater "
             f"(£{tariff.standing_charge_per_day}/day)"
         )
+        print(f"In force as of {tariff.effective_date}")
         return
 
     if not args.email or not args.password:

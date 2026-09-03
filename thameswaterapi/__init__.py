@@ -161,6 +161,9 @@ class Tariff:
     wastewater_rate_per_m3: float
     water_fixed_per_year: float
     wastewater_fixed_per_year: float
+    #: The date these figures took effect, so a caller can price a historical
+    #: reading at the rate in force on its own date.
+    effective_date: datetime.date
 
     @property
     def volumetric_rate_per_m3(self) -> float:
@@ -271,6 +274,17 @@ def _search_tariff_float(pattern: str, text: str, description: str) -> float:
     return float(match.group(1))
 
 
+def _search_tariff_date(pattern: str, text: str, description: str) -> datetime.date:
+    """Return the first captured group of ``pattern`` in ``text`` as a date."""
+    match = re.search(pattern, text)
+    if match is None:
+        raise TariffError(
+            f"Could not find {description} on the Thames Water tariff page "
+            "(the page markup may have changed)"
+        )
+    return datetime.datetime.strptime(match.group(1), "%d %B %Y").date()  # noqa: DTZ007
+
+
 def parse_tariff(html: str) -> Tariff:
     """Parse the metered-customers help page HTML into a :class:`Tariff`.
 
@@ -303,6 +317,13 @@ def parse_tariff(html: str) -> Tariff:
             r"Wastewater £([0-9]+\.[0-9]+) £",
             text,
             "the wastewater fixed charge",
+        ),
+        # The same sentence as the volumetric rates: "...£1.4721 per m3 for
+        # wastewater as of 1 April 2026."
+        effective_date=_search_tariff_date(
+            r"for wastewater as of ([0-9]{1,2} [A-Za-z]+ [0-9]{4})",
+            text,
+            "the date the rates took effect",
         ),
     )
 
