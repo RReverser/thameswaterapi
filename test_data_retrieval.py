@@ -9,6 +9,7 @@ from thameswaterapi import (
     HourlyMeasurement,
     Line,
     Measurement,
+    MeterType,
     _decode_jwt_payload,
     _parse_line_label_as_date,
     lines_to_timeseries,
@@ -558,6 +559,28 @@ class TestParseAccount(unittest.TestCase):
         self.assertEqual(result.property.meterType, 2)
         self.assertIsNotNone(result.property.address)
         self.assertEqual(result.property.address.postcode, "AB1 2CD")
+
+    def test_smart_metered(self):
+        result = parse_account(self.SAMPLE_JSON)
+        # The raw integer compares equal to the enum member, so nothing has
+        # to convert it on the way in.
+        self.assertEqual(result.property.meterType, MeterType.SMART_METERED)
+        self.assertTrue(result.is_smart_metered)
+
+    def test_not_smart_metered(self):
+        for meter_type in (
+            MeterType.UNKNOWN,
+            MeterType.DUMB_METERED,
+            MeterType.UNMETERED,
+            99,  # something they add later
+        ):
+            data = dict(self.SAMPLE_JSON)
+            data["property"] = {**data["property"], "meterType": int(meter_type)}
+            self.assertFalse(parse_account(data).is_smart_metered, meter_type)
+
+    def test_smart_metered_without_a_property(self):
+        data = {k: v for k, v in self.SAMPLE_JSON.items() if k != "property"}
+        self.assertFalse(parse_account(data).is_smart_metered)
 
     def test_contact_details(self):
         result = parse_account(self.SAMPLE_JSON)
