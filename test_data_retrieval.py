@@ -332,6 +332,21 @@ class TestLogout(unittest.TestCase):
         client.logout()
         self.assertEqual(client.s.request.call_args.args, ("GET", END_SESSION_ENDPOINT))
 
+    def test_the_next_call_establishes_a_session_again(self):
+        # The server has torn the session down, so a client still holding
+        # the flag would make its next call against a dead one.
+        client = _client(
+            _response(status=302, headers={"Location": "https://www.invalid/"})
+        )
+        client._authenticated = True
+        client._meter_page_visited = True
+
+        client.logout()
+
+        client.authenticate = mock.Mock()
+        client._ensure_session()
+        client.authenticate.assert_called_once()
+
 
 class TestRefreshTokenGrant(unittest.TestCase):
     def _client_with_token(self, *responses):

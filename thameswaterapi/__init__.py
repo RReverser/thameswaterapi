@@ -697,8 +697,14 @@ class ThamesWater:
 
         The response is a redirect to the post-logout page, which nothing
         reads; only the server-side session teardown matters.
+
+        The client forgets that it had a session afterwards, so a later data
+        call climbs the ladder again rather than making the call against a
+        session the server has already torn down.
         """
         self._request("GET", END_SESSION_ENDPOINT, allow_redirects=False)
+        self._authenticated = False
+        self._meter_page_visited = False
 
     def _generate_pkce(self):
         self.pkce_verifier = (
