@@ -994,17 +994,17 @@ class ThamesWater:
         B2C host survive: the silent step authorizes against that session,
         which is not the one being replaced.
         """
-        for cookie in list(self.s.cookies):
-            domain = cookie.domain.lstrip(".")
-            if domain == B2C_HOST:
+        for domain in self.s.cookies.list_domains():
+            host = domain.lstrip(".")
+            if host == B2C_HOST:
                 continue
             # A cookie with no domain, such as the flag set above, goes to
             # every host and so belongs to this session too.
-            if domain and not any(
-                host == domain or host.endswith(f".{domain}") for host in SESSION_HOSTS
+            if host and not any(
+                site == host or site.endswith(f".{host}") for site in SESSION_HOSTS
             ):
                 continue
-            self.s.cookies.clear(cookie.domain, cookie.path, cookie.name)
+            self.s.cookies.clear(domain)
 
     def _visit_meter_page(self) -> None:
         """Scope the session to the contract account by visiting its page.
