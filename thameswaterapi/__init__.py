@@ -81,6 +81,10 @@ END_SESSION_ENDPOINT = f"{B2C_USER_FLOW_URL}/logout"
 
 MYACCOUNT_URL = "https://myaccount.thameswater.co.uk"
 LOGIN_URL = f"{MYACCOUNT_URL}/login"
+#: Hosts carrying the myaccount session. The B2C host is a sibling under the
+#: same registered domain, and its cookies outlive that session.
+SESSION_HOSTS = ("myaccount.thameswater.co.uk", "www.thameswater.co.uk")
+B2C_HOST = "login.thameswater.co.uk"
 #: Visiting this scopes the session to a contract account, and the AJAX
 #: endpoints below name it as their Referer.
 METER_PAGE_URL = f"{MYACCOUNT_URL}/mydashboard/my-meters-usage"
@@ -954,6 +958,8 @@ class ThamesWater:
 
     def _establish_myaccount_session(self, id_token: str) -> None:
         """Trade the B2C id_token for a myaccount.thameswater.co.uk session."""
+        self._clear_myaccount_cookies()
+
         # The first POST redirects through /twservice/Account/SignIn and then
         # to a second B2C authorize page that carries a new state value and a
         # fresh id_token in its body, so this one does follow its redirects.
@@ -978,6 +984,27 @@ class ThamesWater:
         # completes the session.
         self._login(state, new_id_token)
         self.s.cookies.set(name="b2cAuthenticated", value="true")
+
+    def _clear_myaccount_cookies(self) -> None:
+        """Sign the site out, so a new session can be established.
+
+        The POST in :meth:`_establish_myaccount_session` resolves to the
+        account picker while a session is already live, and that URL carries
+        no ``state``, so establishing one over another fails. Cookies on the
+        B2C host survive: the silent step authorizes against that session,
+        which is not the one being replaced.
+        """
+        for cookie in list(self.s.cookies):
+            domain = cookie.domain.lstrip(".")
+            if domain == B2C_HOST:
+                continue
+            # A cookie with no domain, such as the flag set above, goes to
+            # every host and so belongs to this session too.
+            if domain and not any(
+                host == domain or host.endswith(f".{domain}") for host in SESSION_HOSTS
+            ):
+                continue
+            self.s.cookies.clear(cookie.domain, cookie.path, cookie.name)
 
     def _visit_meter_page(self) -> None:
         """Scope the session to the contract account by visiting its page.

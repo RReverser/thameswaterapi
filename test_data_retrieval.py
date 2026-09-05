@@ -10,6 +10,7 @@ from unittest import mock
 import requests
 
 from thameswaterapi import (
+    B2C_HOST,
     END_SESSION_ENDPOINT,
     TOKEN_ENDPOINT,
     AuthenticationError,
@@ -1002,6 +1003,38 @@ class TestParseAccount(unittest.TestCase):
         self.assertIsNone(result.property)
         self.assertIsNone(result.contactDetails)
         self.assertIsNone(result.correspondence)
+
+
+class TestClearingTheMyaccountSession(unittest.TestCase):
+    """A session is signed out before another is established over it."""
+
+    def _client(self) -> ThamesWater:
+        client = ThamesWater("user@example.com", "hunter2")
+        client.s.cookies.set(
+            "session", "s", domain="myaccount.thameswater.co.uk", path="/"
+        )
+        client.s.cookies.set("picker", "p", domain="www.thameswater.co.uk", path="/")
+        client.s.cookies.set("shared", "x", domain=".thameswater.co.uk", path="/")
+        client.s.cookies.set("b2cAuthenticated", "true")
+        client.s.cookies.set("b2c", "y", domain=B2C_HOST, path="/")
+        return client
+
+    def test_every_cookie_the_site_reads_goes(self):
+        client = self._client()
+        client._clear_myaccount_cookies()
+        self.assertNotIn("session", client.s.cookies)
+        self.assertNotIn("picker", client.s.cookies)
+        # Set on the registered domain, so the site reads it too.
+        self.assertNotIn("shared", client.s.cookies)
+        # No domain at all, so it goes to every host.
+        self.assertNotIn("b2cAuthenticated", client.s.cookies)
+
+    def test_the_b2c_session_survives(self):
+        # The silent step authorizes against it, and it is a different
+        # session from the one being replaced.
+        client = self._client()
+        client._clear_myaccount_cookies()
+        self.assertEqual(client.s.cookies.get("b2c", domain=B2C_HOST), "y")
 
 
 if __name__ == "__main__":
